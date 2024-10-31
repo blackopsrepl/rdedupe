@@ -1,5 +1,6 @@
 //walks a filesystem and finds duplicate files
 use indicatif::{ParallelProgressIterator, ProgressStyle};
+use polars::prelude::*;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::HashMap;
 use std::error::Error;
@@ -64,16 +65,85 @@ pub fn find_duplicates(checksums: HashMap<String, Vec<String>>) -> Vec<Vec<Strin
     duplicates
 }
 
+pub fn collect_statistics(files: Vec<String>, duplicates: Vec<String>) -> DataFrame {
+    let file_sizes: Result<Vec<u64>, std::io::Error> = files
+        .iter()
+        .map(|file| std::fs::metadata(file).map(|meta| meta.len()))
+        .collect();
+
+    let file_sizes = file_sizes?;
+
+    let df = std::sync::Mutex::new(DataFrame::new(vec![
+        Series::new("File".into(), files),
+        Series::new(
+            "isDuplicate".into(),
+            duplicates
+                .iter()
+                .map(|files| if files.len() > 1 { 1 } else { 0 })
+                .collect::<Vec<i32>>(),
+        ),
+        Series::new("Size".into(), file_sizes),
+        Series::new(
+            "Occurrences".into(),
+            duplicates
+                .iter()
+                .map(|files| files.len())
+                .collect::<Vec<i32>>(),
+        ),
+        Series::new(
+            "TotalSize".into(),
+            duplicates
+                .iter()
+                .map(|files| {
+                    files
+                        .iter()
+                        .map(|file| std::fs::metadata(file).unwrap().len())
+                        .sum::<u64>()
+                })
+                .collect::<Vec<u64>>(),
+        ),
+        Series::new(
+            "PotentialSave".into(),
+            duplicates
+                .iter()
+                .map(|files| {
+                    (files.len() - 1)
+                        * files
+                            .iter()
+                            .map(|file| std::fs::metadata(file).unwrap().len() as i32)
+                            .sum::<i32>()
+                })
+                .collect::<Vec<i32>>(),
+        ),
+    ])?);
+    df
+}
+
+pub fn write_report(df: &std::sync::Mutex<DataFrame>) -> Result<(), Box<dyn Error>> {
+    let mut guard = df.lock().unwrap();
+    let mut file = std::fs::File::create("file_report.csv")?;
+    CsvWriter::new(&mut file).finish(&mut guard)?;
+    Ok(())
+}
+
 // invoke the actions along with the path and pattern and progress bar
 pub fn run(path: &str, pattern: &str) -> Result<(), Box<dyn Error>> {
     let files = walk(path)?;
     let files = find(files, pattern);
     println!("Found {} files matching {}", files.len(), pattern);
-    let checksums = checksum(files)?;
+
+    let checksums = checksum(files.clone())?;
+
     let duplicates = find_duplicates(checksums);
-    println!("Found {} duplicate(s)", duplicates.len());
+
+    let statistics = collect_statistics(files, duplicates);
+
     for duplicate in duplicates {
         println!("{:?}", duplicate);
     }
+    println!("Found {} duplicate(s)", duplicates.len());
+
+    write_report(statistics);
+
     Ok(())
 }

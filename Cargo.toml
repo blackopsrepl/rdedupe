@@ -9,6 +9,7 @@ walkdir = "2.3.2"
 md5 = "0.7.0"
 rayon = "1.6.1"
 indicatif = {version = "*", features = ["rayon"]}
+polars = "0.43.1"
 
 [dev-dependencies]
 assert_cmd = "2"
