@@ -16,5 +16,3 @@ jobs:
           override: true
       - name: Run clippy
         run: make lint
-  
-

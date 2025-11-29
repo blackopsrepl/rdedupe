@@ -11,7 +11,17 @@ rayon = "1.6.1"
 indicatif = {version = "*", features = ["rayon"]}
 polars = {version = "0.35", features = ["lazy", "csv"]}
 num_cpus = "1.16"
+thiserror = "1.0"
 
 [dev-dependencies]
+tempfile = "3.0"
 assert_cmd = "2"
 predicates = "2.0.0"
+rand = "0.8"
+
+[profile.release]
+opt-level = "z"      # Optimize for size instead of speed
+lto = true           # Link-Time Optimization - eliminates dead code across crates
+codegen-units = 1    # Better optimization (slower build)
+panic = "abort"      # Smaller binary, no unwinding overhead
+strip = true         # Strip symbols from binary

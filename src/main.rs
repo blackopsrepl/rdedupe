@@ -1,97 +1,76 @@
-//Searches a path for duplicate files
 use clap::Parser;
 
 #[derive(Parser)]
-//add extended help
 #[clap(
-    version = "1.1",
-    author = "Noah Gift",
-    about = "Finds duplicate files",
-    after_help = "Example: rdedupe search --path . --pattern .txt"
+    version = "2.0",
+    author = "Vittorio Distefano",
+    about = "Finds and removes duplicate files",
+    after_help = "Examples:\n  rdedupe .                     # Report duplicates in current dir\n  rdedupe /path --pattern .txt  # Report .txt duplicates\n  rdedupe . --delete --dry-run  # Preview what would be deleted\n  rdedupe . --delete --force    # Delete duplicates without confirmation"
 )]
 struct Cli {
-    #[clap(subcommand)]
-    command: Option<Commands>,
-}
+    // Directory to scan for duplicates
+    #[clap(default_value = ".")]
+    path: String,
 
-#[derive(Parser)]
-enum Commands {
-    Search {
-        #[clap(long, default_value = ".")]
-        path: String,
-        #[clap(long, default_value = "")]
-        pattern: String,
-    },
+    // File extension pattern to match (e.g., .txt, .jpg)
+    #[clap(long, default_value = "")]
+    pattern: String,
 
-    Dedupe {
-        #[clap(long, default_value = ".")]
-        path: String,
-        #[clap(long, default_value = "")]
-        pattern: String,
-        #[clap(long, help = "Generate detailed CSV report")]
-        csv: Option<String>,
-    },
+    // Generate detailed CSV report
+    #[clap(long)]
+    csv: Option<String>,
 
-    //create count with path and pattern defaults for both
-    Count {
-        #[clap(long, default_value = ".")]
-        path: String,
-        #[clap(long, default_value = "")]
-        pattern: String,
-    },
+    // Delete duplicate files (keeps first file in each group)
+    // TODO: keep newest
+    #[clap(long)]
+    delete: bool,
+
+    // Preview deletions without actually deleting
+    #[clap(long, requires = "delete")]
+    dry_run: bool,
+
+    // Skip confirmation prompt when deleting
+    #[clap(long, requires = "delete")]
+    force: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
-    match cli.command {
-        Some(Commands::Search { path, pattern }) => {
-            println!("Searching for files in {} matching {}", path, pattern);
 
-            let files = rdedupe::walk(&path).unwrap();
-            let files = rdedupe::find(files, &pattern);
+    rdedupe::display_thread_info();
+    println!("Analyzing files in {} matching '{}'", cli.path, cli.pattern);
 
-            //print count of files matching pattern
-            println!("Found {} files matching {}", files.len(), pattern);
+    let result = rdedupe::run_with_dataframe(&cli.path, &cli.pattern, cli.csv.as_deref());
 
-            //print files
-            for file in files {
-                println!("{}", file);
+    match result {
+        Ok(df) => {
+            println!("\n=== Analysis Complete ===");
+            println!("Total files analyzed: {}", df.height());
+
+            if let Some(ref csv_path) = cli.csv {
+                println!("Detailed CSV report saved to: {}", csv_path);
             }
-        }
-        Some(Commands::Dedupe { path, pattern, csv }) => {
-            //dedupe files matching a pattern with enhanced reporting
-            //display the progress bar using indicatif
-            rdedupe::display_thread_info();
-            println!("Analyzing files in {} matching '{}'", path, pattern);
-            
-            // Always use enhanced DataFrame functionality for better progress reporting
-            let result = rdedupe::run_with_dataframe(&path, &pattern, csv.as_deref());
 
-            match result {
-                Ok(df) => {
-                    println!("\n=== Analysis Complete ===");
-                    println!("Total files analyzed: {}", df.height());
-                    if let Some(csv_path) = csv {
-                        println!("Detailed CSV report saved to: {}", csv_path);
+            if cli.delete {
+                println!("\n=== Delete Mode ===");
+                match rdedupe::delete_duplicates(&df, cli.dry_run, cli.force) {
+                    Ok(result) => {
+                        if result.dry_run {
+                            println!("\n(Dry run complete - no files were deleted)");
+                        } else if result.deleted_count > 0 {
+                            println!("\nDeletion complete!");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error during deletion: {}", e);
+                        std::process::exit(1);
                     }
                 }
-                
-                Err(e) => println!("Error: {}", e),
             }
         }
-        
-        Some(Commands::Count { path, pattern }) => {
-            //count files matching a pattern
-            println!("Counting files in {} matching {}", path, pattern);
-
-            let files = rdedupe::walk(&path).unwrap();
-            let files = rdedupe::find(files, &pattern);
-
-            println!("Found {} files matching {}", files.len(), pattern);
-        }
-
-        None => {
-            println!("No command given");
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
         }
     }
 }
