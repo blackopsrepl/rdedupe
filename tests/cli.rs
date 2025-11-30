@@ -24,7 +24,7 @@ fn dedupe_report_default() {
         .arg(".txt")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Duplicate Files Found"));
+        .stderr(predicate::str::contains("Duplicate Files Found"));
 }
 
 #[test]
@@ -37,9 +37,9 @@ fn dedupe_dry_run_shows_preview() {
         .arg("--dry-run")
         .assert()
         .success()
-        .stdout(predicate::str::contains("DRY RUN"))
-        .stdout(predicate::str::contains("would be DELETED"))
-        .stdout(predicate::str::contains("would be KEPT"));
+        .stderr(predicate::str::contains("DRY RUN"))
+        .stderr(predicate::str::contains("would be DELETED"))
+        .stderr(predicate::str::contains("would be KEPT"));
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn dedupe_delete_force_removes_duplicates() {
         .arg("--force")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Deleted"));
+        .stderr(predicate::str::contains("Deleted"));
 
     // First file (alphabetically) should be kept, second deleted
     assert!(file1.exists(), "first file (alphabetically) should be kept");
@@ -181,5 +181,5 @@ fn dedupe_no_duplicates_found() {
         .arg("--dry-run")
         .assert()
         .success()
-        .stdout(predicate::str::contains("No duplicate files found"));
+        .stderr(predicate::str::contains("No duplicate files found"));
 }

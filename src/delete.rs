@@ -1,5 +1,6 @@
 //! Duplicate file deletion operations.
 
+use log::{error, info, warn};
 use polars::prelude::*;
 use std::error::Error;
 use std::fs;
@@ -18,21 +19,21 @@ pub fn confirm_deletion(
     files_to_delete: &[String],
     bytes_to_free: u64,
 ) -> Result<bool, Box<dyn Error>> {
-    println!(
+    warn!(
         "\n⚠️  WARNING: About to DELETE {} files",
         files_to_delete.len()
     );
-    println!(
+    warn!(
         "   This will free {} bytes ({:.2} MB)",
         bytes_to_free,
         bytes_to_free as f64 / 1_048_576.0
     );
-    println!("\nFiles to be deleted:");
+    warn!("\nFiles to be deleted:");
     for (i, file) in files_to_delete.iter().take(10).enumerate() {
-        println!("  {}. {}", i + 1, file);
+        warn!("  {}. {}", i + 1, file);
     }
     if files_to_delete.len() > 10 {
-        println!("  ... and {} more files", files_to_delete.len() - 10);
+        warn!("  ... and {} more files", files_to_delete.len() - 10);
     }
 
     print!("\nType 'yes' to confirm deletion: ");
@@ -61,7 +62,7 @@ pub fn delete_duplicates(
         .collect()?;
 
     if duplicates.height() == 0 {
-        println!("No duplicate files found to delete.");
+        info!("No duplicate files found to delete.");
         return Ok(DeleteResult {
             deleted_count: 0,
             bytes_freed: 0,
@@ -119,7 +120,7 @@ pub fn delete_duplicates(
     }
 
     if files_to_delete.is_empty() {
-        println!("No files to delete after analysis.");
+        info!("No files to delete after analysis.");
         return Ok(DeleteResult {
             deleted_count: 0,
             bytes_freed: 0,
@@ -130,20 +131,20 @@ pub fn delete_duplicates(
     }
 
     if dry_run {
-        println!("\n🔍 DRY RUN - No files will be deleted");
-        println!(
+        info!("\n🔍 DRY RUN - No files will be deleted");
+        info!(
             "Would delete {} files, freeing {} bytes ({:.2} MB)",
             files_to_delete.len(),
             bytes_to_free,
             bytes_to_free as f64 / 1_048_576.0
         );
-        println!("\nFiles that would be KEPT (one per duplicate group):");
+        info!("\nFiles that would be KEPT (one per duplicate group):");
         for file in &kept_files {
-            println!("  ✓ {}", file);
+            info!("  ✓ {}", file);
         }
-        println!("\nFiles that would be DELETED:");
+        info!("\nFiles that would be DELETED:");
         for file in &files_to_delete {
-            println!("  ✗ {}", file);
+            info!("  ✗ {}", file);
         }
 
         return Ok(DeleteResult {
@@ -156,7 +157,7 @@ pub fn delete_duplicates(
     }
 
     if !force && !confirm_deletion(&files_to_delete, bytes_to_free)? {
-        println!("Deletion cancelled by user.");
+        info!("Deletion cancelled by user.");
         return Ok(DeleteResult {
             deleted_count: 0,
             bytes_freed: 0,
@@ -166,7 +167,7 @@ pub fn delete_duplicates(
         });
     }
 
-    println!("\n🗑️  Deleting {} files...", files_to_delete.len());
+    info!("\n🗑️  Deleting {} files...", files_to_delete.len());
     let mut actually_deleted = Vec::new();
     let mut actual_bytes_freed: u64 = 0;
     let mut errors = 0;
@@ -179,30 +180,30 @@ pub fn delete_duplicates(
                     Ok(()) => {
                         actually_deleted.push(file_path.clone());
                         actual_bytes_freed += size;
-                        println!("  ✓ Deleted: {}", file_path);
+                        info!("  ✓ Deleted: {}", file_path);
                     }
                     Err(e) => {
                         errors += 1;
-                        eprintln!("  ✗ Failed to delete {}: {}", file_path, e);
+                        error!("  ✗ Failed to delete {}: {}", file_path, e);
                     }
                 }
             }
             Err(e) => {
                 errors += 1;
-                eprintln!("  ✗ Cannot access {}: {}", file_path, e);
+                error!("  ✗ Cannot access {}: {}", file_path, e);
             }
         }
     }
 
-    println!("\n=== Deletion Summary ===");
-    println!("Files deleted: {}", actually_deleted.len());
-    println!(
+    info!("\n=== Deletion Summary ===");
+    info!("Files deleted: {}", actually_deleted.len());
+    info!(
         "Bytes freed: {} ({:.2} MB)",
         actual_bytes_freed,
         actual_bytes_freed as f64 / 1_048_576.0
     );
     if errors > 0 {
-        println!("Errors: {}", errors);
+        warn!("Errors: {}", errors);
     }
 
     Ok(DeleteResult {

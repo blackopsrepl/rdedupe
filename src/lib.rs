@@ -13,6 +13,7 @@ pub use delete::{delete_duplicates, DeleteResult};
 pub use fileinfo::{collect_file_info, FileInfo};
 pub use fs::{find, walk};
 
+use log::info;
 use polars::prelude::*;
 use std::error::Error;
 
@@ -20,8 +21,8 @@ pub fn display_thread_info() {
     let num_cpus = num_cpus::get();
     let rayon_threads = rayon::current_num_threads();
 
-    println!("💻 CPU cores: {}", num_cpus);
-    println!("🧵 Rayon thread pool size: {}", rayon_threads);
+    info!("💻 CPU cores: {}", num_cpus);
+    info!("🧵 Rayon thread pool size: {}", rayon_threads);
 }
 
 pub fn run_with_dataframe(
@@ -29,15 +30,15 @@ pub fn run_with_dataframe(
     pattern: &str,
     output_csv: Option<&str>,
 ) -> Result<DataFrame, Box<dyn Error>> {
-    println!("Scanning directory: {}", path);
+    info!("Scanning directory: {}", path);
 
     let files = walk(path)?;
     let files = find(files, pattern);
 
-    println!("Found {} files matching pattern '{}'", files.len(), pattern);
+    info!("Found {} files matching pattern '{}'", files.len(), pattern);
 
     if files.is_empty() {
-        println!("No files found to analyze.");
+        info!("No files found to analyze.");
         return empty_dataframe();
     }
 
@@ -46,8 +47,8 @@ pub fn run_with_dataframe(
 
     let stats = generate_statistics(&df)?;
 
-    println!("\n=== File Analysis Summary ===");
-    println!("{}", stats);
+    info!("\n=== File Analysis Summary ===");
+    info!("{}", stats);
 
     validate_duplicates(&df)?;
 
@@ -58,10 +59,10 @@ pub fn run_with_dataframe(
         .collect()?;
 
     if duplicates.height() > 0 {
-        println!("\n=== Duplicate Files Found ===");
-        println!("{}", duplicates);
+        info!("\n=== Duplicate Files Found ===");
+        info!("{}", duplicates);
     } else {
-        println!("\nNo duplicate files found.");
+        info!("\nNo duplicate files found.");
     }
 
     if let Some(csv_path) = output_csv {

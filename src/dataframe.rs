@@ -1,6 +1,7 @@
 //! DataFrame creation, statistics, validation, and CSV export.
 
 use crate::fileinfo::FileInfo;
+use log::info;
 use polars::prelude::*;
 use std::error::Error;
 
@@ -51,7 +52,7 @@ pub fn create_dataframe(file_infos: Vec<FileInfo>) -> Result<DataFrame, Box<dyn 
         .collect()?
         .height();
 
-    println!("Found {} files in {} duplicate groups", duplicate_count, group_count);
+    info!("Found {} files in {} duplicate groups", duplicate_count, group_count);
 
     Ok(df)
 }
@@ -81,7 +82,7 @@ pub fn generate_statistics(df: &DataFrame) -> Result<DataFrame, Box<dyn Error>> 
 }
 
 pub fn validate_duplicates(df: &DataFrame) -> Result<(), Box<dyn Error>> {
-    println!("\n=== Duplicate Detection Validation ===");
+    info!("\n=== Duplicate Detection Validation ===");
 
     let duplicates = df
         .clone()
@@ -90,7 +91,7 @@ pub fn validate_duplicates(df: &DataFrame) -> Result<(), Box<dyn Error>> {
         .collect()?;
 
     if duplicates.height() == 0 {
-        println!("✓ No duplicates found - validation passed");
+        info!("✓ No duplicates found - validation passed");
         return Ok(());
     }
 
@@ -100,14 +101,14 @@ pub fn validate_duplicates(df: &DataFrame) -> Result<(), Box<dyn Error>> {
         .agg([col("file_path").count().alias("file_count")])
         .collect()?;
 
-    println!("Duplicate groups found:");
+    info!("Duplicate groups found:");
     for row in 0..grouped.height() {
         let hash = grouped.column("md5_hash")?.get(row)?;
         let count = grouped.column("file_count")?.get(row)?;
-        println!("  Hash: {} -> {} files", hash, count);
+        info!("  Hash: {} -> {} files", hash, count);
     }
 
-    println!("✓ Duplicate detection validation completed");
+    info!("✓ Duplicate detection validation completed");
     Ok(())
 }
 
@@ -119,7 +120,7 @@ pub fn generate_csv_report(df: &mut DataFrame, output_path: &str) -> Result<(), 
         .collect()?;
 
     if duplicates_only.height() == 0 {
-        println!("No duplicates found - CSV report not generated");
+        info!("No duplicates found - CSV report not generated");
         return Ok(());
     }
 
@@ -130,7 +131,7 @@ pub fn generate_csv_report(df: &mut DataFrame, output_path: &str) -> Result<(), 
         .include_header(true)
         .finish(&mut duplicates_df)?;
 
-    println!(
+    info!(
         "CSV report generated: {} ({} duplicate files)",
         output_path,
         duplicates_df.height()

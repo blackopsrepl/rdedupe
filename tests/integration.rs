@@ -7,6 +7,8 @@ use test_utils::*;
 /// Test: Generate files with 30% duplicates and verify detection accuracy
 #[test]
 fn test_duplicate_detection_30_percent() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 100,
         duplicate_coefficient: 0.3,
@@ -38,6 +40,8 @@ fn test_duplicate_detection_30_percent() {
 /// Test: Generate files with 50% duplicates and verify detection accuracy
 #[test]
 fn test_duplicate_detection_50_percent() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 100,
         duplicate_coefficient: 0.5,
@@ -69,6 +73,8 @@ fn test_duplicate_detection_50_percent() {
 /// Test: Generate files with 0% duplicates (all unique)
 #[test]
 fn test_no_duplicates() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 50,
         duplicate_coefficient: 0.0,
@@ -103,6 +109,8 @@ fn test_no_duplicates() {
 /// Test: Full pipeline - generate, detect, deduplicate, verify
 #[test]
 fn test_full_deduplication_pipeline() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 80,
         duplicate_coefficient: 0.4,
@@ -156,6 +164,8 @@ fn test_full_deduplication_pipeline() {
 /// Test: Dry run doesn't delete files
 #[test]
 fn test_dry_run_no_deletion() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 50,
         duplicate_coefficient: 0.3,
@@ -197,6 +207,8 @@ fn test_dry_run_no_deletion() {
 /// Test: Large dataset with high duplicate ratio
 #[test]
 fn test_large_dataset_high_duplicates() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 200,
         duplicate_coefficient: 0.7,
@@ -240,6 +252,8 @@ fn test_large_dataset_high_duplicates() {
 /// Test: Small dataset with low duplicate ratio
 #[test]
 fn test_small_dataset_low_duplicates() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 20,
         duplicate_coefficient: 0.1,
@@ -271,6 +285,8 @@ fn test_small_dataset_low_duplicates() {
 /// Test: Verify one file kept per duplicate group
 #[test]
 fn test_one_file_kept_per_group() {
+    init_test_logger();
+
     let config = TestFileConfig {
         num_files: 60,
         duplicate_coefficient: 0.4,

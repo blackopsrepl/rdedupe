@@ -1,6 +1,6 @@
 [package]
 name = "rdedupe"
-version = "0.1.1"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
@@ -11,7 +11,8 @@ rayon = "1.6.1"
 indicatif = {version = "*", features = ["rayon"]}
 polars = {version = "0.35", features = ["lazy", "csv"]}
 num_cpus = "1.16"
-thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
 
 [dev-dependencies]
 tempfile = "3.0"

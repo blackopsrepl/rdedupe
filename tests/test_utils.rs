@@ -3,7 +3,20 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use tempfile::TempDir;
+
+static INIT: Once = Once::new();
+
+/// Initialize logger for tests
+pub fn init_test_logger() {
+    INIT.call_once(|| {
+        env_logger::builder()
+            .is_test(true)
+            .try_init()
+            .ok();
+    });
+}
 
 /// Configuration for test file generation
 #[derive(Debug, Clone)]

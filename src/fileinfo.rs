@@ -1,6 +1,7 @@
 //! File information collection and parallel processing.
 
 use indicatif::{ParallelProgressIterator, ProgressStyle};
+use log::info;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::error::Error;
 use std::fs;
@@ -71,7 +72,7 @@ pub fn collect_file_info(files: Vec<String>) -> Result<Vec<FileInfo>, Box<dyn Er
         return Ok(Vec::new());
     }
 
-    println!(
+    info!(
         "\nAnalyzing {} files with {} threads...",
         files.len(),
         rayon::current_num_threads()
@@ -94,7 +95,7 @@ pub fn collect_file_info(files: Vec<String>) -> Result<Vec<FileInfo>, Box<dyn Er
         .collect();
 
     pb.finish_with_message("✓ File analysis complete!");
-    println!();
+    info!("");
 
     let valid_infos: Vec<FileInfo> = file_infos.into_iter().flatten().collect();
 
