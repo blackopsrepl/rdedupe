@@ -75,7 +75,8 @@ previous record's seal, a newline, and this record serialized with an empty `sea
 first record chains from the empty string. Sequences must be 1, 2, 3, …; any record that
 fails its seal or sequence makes every command refuse the journal.
 
-State machine per action:
+State machine per action. Recorded states are `prepared`, `applied`, `committed`,
+`failed`, `restored` and `purged`:
 
 ```
 quarantine: prepared → applied → committed        (or prepared → failed,
@@ -85,9 +86,39 @@ extent:     prepared → applied(bytes)* → committed (or … → failed)
 recovery:   … → restored | purged
 ```
 
+`indeterminate` is never written. It is the assessment `recover`, `restore`, `purge`
+and `apply --resume` reach when the last recorded state and the filesystem facts do not
+identify where the object is (for example the quarantine slot holds a different object,
+or the original object is gone and its path reoccupied). Recovery never infers success
+from a record alone: it locates the journaled object by identity and creation time (or
+size and modification time where no creation time exists) at its original path and in
+its quarantine slot, and an indeterminate action stops the command with exit 2 and an
+explanation instead of acting.
+
 Durability ordering for a quarantine action: create the quarantine directory and marker
 (synced); append+fsync `prepared`; rename without replacement; fsync both directories;
-append+fsync `applied`; append+fsync `committed`.
+append+fsync `applied`; append+fsync `committed`. An extent action appends+fsyncs
+`prepared`, then `applied` with `bytes_completed` after every shared chunk (16 MiB), then
+`committed`.
+
+### What survives a crash and what survives power loss
+
+- **Process crash** (`kill -9`, panic, OOM kill): tested. `tests/recovery.rs` kills a
+  child process after every durable record of apply (quarantine and extent), restore,
+  purge and resume, and checks file contents after recovery; it also makes a journal
+  write fail part-way (file-size limit) and checks that the run stops before the next
+  mutation. The guarantees hold on any filesystem, because a crash loses no data the
+  kernel accepted.
+- **Power loss or kernel crash**: argued from the ordering above, not tested. It holds
+  where `fsync` of a file and of its directory makes the file's content and the
+  directory's entries durable and a rename is atomic in the persisted state: ext4 (any
+  `data=` mode), XFS and Btrfs on Linux, and APFS on macOS, where rdedupe uses
+  `F_FULLFSYNC` for files (through Rust's `sync_all`) and directories, because plain
+  `fsync` there leaves data in the drive cache. It does not hold on storage that
+  acknowledges flushes it has not performed (some USB bridges, virtual disks with
+  `cache=unsafe`), on ext4 with `nobarrier`, or on network and FUSE filesystems (NFS, SMB,
+  sshfs), whose rename and flush semantics depend on the server; use quarantine there
+  only if losing the quarantine state after a power failure is acceptable.
 
 Corruption handling: a final line without `\n` is a torn record and is truncated away by
 the next `restore`/`purge`; any other unparsable line, or a record with an unknown schema,
@@ -97,7 +128,32 @@ is corruption and every command refuses the journal.
 
 Header `{schema, layout, authority}` where `layout` is the fingerprint layout
 (`blake3-sample-layout-v1`); then one entry per path: `path`, `device`, `inode`, `size`,
-`modified_ns`, `changed_ns`, `digest`. Written to a temporary sibling, synced, and
-published only into an absent path (hard link, never replacing) or over a single-link
-file that still carries an rdedupe cache header and the identity seen before the scan. A file with another schema or layout, or any corrupt entry, is ignored as a
-whole. Entries are used only with `--trust-cache`, and only when every validator matches.
+`modified_ns`, `changed_ns`, `digest`. Written to a temporary sibling
+`<cache>.tmp-<pid>-<nanos>`, synced, and published only into an absent path (hard link,
+never replacing) or over a single-link file that still carries an rdedupe cache header
+and the identity seen before the scan. A file with another schema or layout, or any
+corrupt entry, is ignored as a whole. Entries are used only with `--trust-cache`, and
+only when every validator matches.
+
+Limits of the validators, and what rdedupe does about them. None of these can produce a
+false group, because groups are always byte-compared; they can only make a
+`--trust-cache` scan miss a duplicate, which is why such scans are `heuristic` and plans
+refuse them. An exact scan (the default) reads current content and never uses entries.
+
+- **Inode reuse**: a deleted file's inode number can be given to a new file. The new file
+  also needs the same device, size, modification time and change time to match; the
+  change time is set by the kernel when the file is created and cannot be set by users.
+- **Restored or preserved timestamps**: `cp -p`, `rsync -t`, `tar` and backup restores
+  set the modification time, but writing the file changes its change time, so the entry
+  no longer matches.
+- **Coarse timestamps**: filesystems with 1 s or 2 s resolution (FAT, some network
+  filesystems) can show identical timestamps for a same-size rewrite within one tick. A
+  trusted scan can then reuse a stale digest. Use the default exact mode, or `--fresh`,
+  on such filesystems.
+- **Network filesystems**: clients cache attributes, so validators can be stale for
+  seconds; another client's writes may not change them at all until the cache expires.
+  Do not use `--trust-cache` on NFS/SMB.
+- **Interrupted updates**: an interrupted scan (SIGINT, `kill -9`, power loss) never
+  replaces the published cache; at worst a temporary sibling is left, and the next scan
+  with the same `--cache` removes temporaries whose writer process no longer exists
+  (`tests/cache.rs`).

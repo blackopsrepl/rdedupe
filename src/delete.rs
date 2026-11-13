@@ -87,7 +87,13 @@ pub fn execute_in(
         ));
     }
     // Verify before creating the journal so an invalid plan leaves no artifacts.
-    crate::plan::verify_plan_in(plan, &options.index)?;
+    let header = crate::plan::verify_plan_in(plan, &options.index)?;
+    if header.action == ActionKind::Quarantine && !crate::probe::QUARANTINE_SUPPORTED {
+        return Err(Error::Capability(
+            "quarantine needs an atomic no-replace rename, which this platform lacks; nothing was changed"
+                .into(),
+        ));
+    }
     let (mut journal, previous) = if options.resume {
         let journal = Journal::open_existing(journal_path)?;
         let previous = crate::resume::Previous::load(&journal, &options.index)?;

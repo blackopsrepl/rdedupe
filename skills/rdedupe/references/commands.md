@@ -23,14 +23,15 @@ only the cache file).
 | `--pattern TEXT` | Only inventory paths whose full path contains this byte substring. |
 | `--protect DIR` | Never make members under DIR action targets (repeatable). Matches whole path components: `/data/keep` does not cover `/data/keeper`. |
 | `--prefer DIR` | Prefer keepers under DIR; earlier occurrences win (repeatable). |
-| `--prefer-newest` | Prefer the most recently modified member before native path order. |
+| `--prefer-newest` | Prefer the most recently modified member before native path order. Every supported (Unix) platform records a modification time with nanoseconds; times before 1970 are negative and order correctly; equal times fall back to native path order. |
 | `--include-empty` | Make empty files eligible copies. By default empty-file groups are reported but every non-keeper is `retained: empty file`, so plans never act on them (they are often markers such as `__init__.py` or `.gitkeep`). |
 | `--one-file-system` | Do not cross into other filesystems below each root. |
 | `--cache FILE` | Fingerprint cache to refresh after the scan. Never consulted unless `--trust-cache`. FILE must be absent or an existing rdedupe cache; any other file, a symlink or a file with other hard links is refused (exit 4) before scanning and left untouched. |
 | `--trust-cache` | Reuse cached fingerprints whose validators match. Makes the scan heuristic; plans refuse it. |
 | `--fresh` | Ignore existing cache contents (the cache is still rewritten). |
 | `--progress` | Stage progress on stderr. |
-| `--memory-mib N` | Working-set budget: SQLite page cache + read buffers + 4 MiB allowance (default 64). |
+| `--memory-mib N` | Working-set budget: SQLite page cache + read buffers + queue + 3 MiB allowance (default 64). |
+| `--queue N` | Queue depth: records per batch handed between stages, 16 to 65536 (default 256). Each record is charged 4 KiB of the memory budget. |
 | `--buffer-kib N` | Size of each read buffer, 4 to 8192 (default 256). |
 | `--readers N` | Concurrent fingerprint readers, 1 to 64 (default 4); comparison batches `readers + 1` members per pass. On rotational disks prefer `--readers 1`. |
 | `--descriptors N` | Maximum open file descriptors, enforced as the process `RLIMIT_NOFILE` soft limit (never raised); must be at least 13 + readers (default 32). |
@@ -149,7 +150,7 @@ never by key order or line position within a kind.
 
 - `summary` (first): `schema`, `binary_version`, `completeness` (`complete`/`partial`/`cancelled`/`failed`), `exactness` (`exact`/`heuristic`), `unresolved` (count), `cache_provenance`, and `metrics` (`sqlite_page_cache_bytes` is the page-cache cap derived
 from the budget, not memory actually used): `paths`, `objects`, `aliases`, `symlinks_skipped`, `special_files_skipped`, `owned_dirs_skipped`, `candidate_objects`, `eliminated_by_size`, `eliminated_by_fingerprint` (unique sampled or full-content digest), `eliminated_by_comparison` (shared a digest but matched nothing byte for byte), `fingerprint_bytes_read`, `full_hash_bytes_read`, `comparison_bytes_read`, `cached_fingerprints_reused`, `groups`, `participants`, `eligible_copies`, `logical_redundant_bytes`, `estimated_allocated_bytes`, `sqlite_page_cache_bytes`, `inventory_bytes` (final size of the on-disk inventory; above `sqlite_page_cache_bytes` the inventory was paged rather than held in memory).
-- `member` (one per group member, ordered by group then path): `group`, `path`, `identity` (`device`, `inode`), `size`, `allocated`, `links`, `is_keeper`, `protected`, `reason`.
+- `member` (one per group member, ordered by group then path): `group`, `path`, `identity` (`device`, `inode`), `size`, `allocated`, `links`, `is_keeper`, `protected`, `reason`, `metadata_differs_from_keeper` (list of `permissions`, `owner`, `group`, `extended attributes` that differ from the keeper's; empty for the keeper). Removing a copy loses its metadata; plan reasons say so.
 - `unresolved`: `path`, `operation` (`traverse`, `metadata`, `fingerprint`, `compare`), `message`, `retry_safe`.
 - `end` (last): `schema`, `groups`, `unresolved`. A stream without `end` was cut short.
 
@@ -211,7 +212,8 @@ unusable (quarantined files stay on disk and can be moved back by hand).
 
 Defaults suit most machines. For very large trees or small machines use
 `--memory-mib 16 --buffer-kib 64 --readers 1 --descriptors 16`; the minimum accepted is
-`--memory-mib 7 --buffer-kib 4 --readers 1 --descriptors 14 --temp-mib 16`. The budget
+`--memory-mib 6 --buffer-kib 4 --readers 1 --descriptors 14 --temp-mib 16 --queue 16`
+(`--memory-mib 7` with the default queue). The budget
 bounds the engine's working set; whole-process RSS adds the binary and allocator overhead
 (measured at about 11.5 MiB peak for a 16 MiB budget on a 4,000-member group plus two
 256 MiB files; see docs/benchmarks.md).

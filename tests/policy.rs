@@ -141,3 +141,38 @@ fn keeper_choice_is_independent_of_scan_order() {
     rdedupe::report::write(&b, rdedupe::report::Format::Csv, &mut out_b).unwrap();
     assert_eq!(out_a, out_b);
 }
+
+/// Content equality ignores metadata, but every output says what removing a copy loses.
+#[test]
+fn metadata_differences_are_reported_and_named_in_plan_reasons() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let keeper = fixture.write("a", b"same");
+    let copy = fixture.write("b", b"same");
+    std::fs::set_permissions(&keeper, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let records = scan_jsonl([fixture.str()]);
+    let member = records
+        .iter()
+        .find(|r| r["record"] == "member" && decode_path(&r["path"]) == copy)
+        .unwrap();
+    assert_eq!(
+        member["metadata_differs_from_keeper"],
+        serde_json::json!(["permissions"])
+    );
+    let kept = records
+        .iter()
+        .find(|r| r["record"] == "member" && decode_path(&r["path"]) == keeper)
+        .unwrap();
+    assert_eq!(kept["metadata_differs_from_keeper"], serde_json::json!([]));
+    let work = Fixture::new();
+    let result = library_scan(&[fixture.root()], Policy::default());
+    rdedupe::plan::write_plan(&result, &work.path("plan"), ActionKind::Quarantine).unwrap();
+    let plan = std::fs::read_to_string(work.path("plan")).unwrap();
+    assert!(
+        plan.contains(
+            "differs from the keeper in permissions (not kept when this copy is removed)"
+        ),
+        "{plan}"
+    );
+}

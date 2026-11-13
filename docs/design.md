@@ -50,7 +50,13 @@ discover → size classes → fingerprints → exact comparison → groups → a
   every empty non-keeper unless `--include-empty` is given, so plans never act on them.
 - **Fingerprints** (`src/fingerprint.rs`): BLAKE3 over the layout name, the size and three
   fixed 64 KiB windows (start, middle, end), read in buffer-sized chunks; small files are
-  read once. Readers run in a bounded pool (`src/scheduler.rs`), each owning one buffer.
+  read once. Readers run in a bounded pool (`src/scheduler.rs`); each leases one buffer
+  from the scan's buffer pool (allocated once, `readers + 1` buffers) for a page of work.
+  *Incremental continuation:* when the windows cover every byte (files up to two
+  windows), the sampled digest already is a full-content digest, so refinement is skipped
+  and the file is never read again for hashing. For larger files the windows are
+  non-contiguous, so no prefix of a full-content hash exists to continue from; refinement
+  streams the whole file once.
 - **Exact comparison** (`src/compare.rs`, `src/candidates.rs`): inside each bucket, members
   are compared with one representative of every equality class found so far, so a bucket
   holding several distinct contents (a collision) still yields separate, exact groups. One
@@ -58,7 +64,8 @@ discover → size classes → fingerprints → exact comparison → groups → a
   lockstep pass (each file read once per pass; a member drops out at its first differing
   chunk), so an all-identical bucket of N files costs about N + N/(readers + 1) file reads.
   Fingerprint readers are idle during comparison, so the batch reuses their descriptors and
-  buffers.
+  leases its buffers from the same pool, splitting each buffer into two halves (one per
+  open file): `readers + 2` open files fit in `readers + 1` buffers.
 - **Refinement**: a sampled bucket of files larger than two windows that shows more than
   two equality classes means the samples are blind to the differences. Its comparison
   stops, every member's complete content is hashed (streamed BLAKE3), and comparison
@@ -76,16 +83,22 @@ discover → size classes → fingerprints → exact comparison → groups → a
 
 All inventory, fingerprint, comparison-class and group state lives in a private SQLite
 database (`src/store.rs`) in a fresh `0700` workspace under `--scratch-dir`, removed on
-exit. Every consumer pages through it with keyset cursors of 256 rows; nothing collects
-the inventory in memory (a digest bucket that fits in one 256-row page is classified with
-its equality classes in memory; larger buckets keep them in the database), including keeper selection, plan writing, reporting, plan
-verification (which uses its own disk-backed index) and recovery (which streams the
-journal).
+exit. The workspace carries a marker with the owner's pid; a later run removes
+workspaces whose owner no longer exists (left by `kill -9` or power loss) and reports how
+many in the `abandoned_scratch_removed` metric. Every consumer pages through the database
+with keyset cursors of `--queue` rows (default 256): the queue depth is the only batch
+handed between stages, so there is no unbounded queue between discovery, readers and
+later stages, and nothing collects the inventory in memory (a digest bucket that fits in
+one page is classified with its equality classes in memory; larger buckets keep them in
+the database). The same holds for keeper selection, plan writing, reporting, plan
+verification (its own disk-backed index under `apply --scratch-dir`, capped by
+`apply --temp-mib`) and recovery (which streams the journal).
 
 `Budget` (`src/config.rs`) validates and derives the limits:
 
-- memory: SQLite page cache = `--memory-mib` − (readers + 1) × buffer − 4 MiB allowance,
-  at least 2 MiB;
+- memory: SQLite page cache = `--memory-mib` − (readers + 1) × buffer − `--queue` × 4 KiB
+  (a record is bounded by `PATH_MAX`) − 3 MiB allowance, at least 2 MiB;
+- queue: 16 to 65,536 records per page;
 - descriptors: 13 fixed (3 stdio, 1 output file, 4 reserved for SQLite database and
   temporary files — the scan database keeps no journal or shared-memory file, the plan
   index used by `apply` does, 2 comparison inputs, 2 walker directory handles,
@@ -95,9 +108,33 @@ journal).
   explicit error and the workspace is still removed.
 
 The budget bounds the engine's working set. Measured whole-process RSS additionally
-includes the binary, the allocator and libc; `tests/resources.rs` runs a 4,000-member
-group plus two 256 MiB files under `RLIMIT_NOFILE=16` and asserts peak RSS below 64 MiB
-(observed: about 12 MiB with a 16 MiB budget).
+includes the binary, the allocator and libc, so the two are related but not identical.
+`tests/resources.rs` runs a 4,000-member group plus two 256 MiB files under
+`RLIMIT_NOFILE=16` and asserts peak RSS below 64 MiB (observed: about 13 MiB with a
+16 MiB budget), and scans 60,600 paths at a 7 MiB budget with `--queue 64`, where the inventory
+database ends about 14 times larger than the page cache (`inventory_bytes` versus
+`sqlite_page_cache_bytes` in the summary), asserting exact groups, peak RSS below 32 MiB
+(observed: about 12 MiB) and at most 16 open descriptors sampled from `/proc` (observed:
+6).
+
+## Empty files, metadata differences and storage
+
+- **Empty files** are exact duplicates of each other but free nothing; they are grouped
+  and reported, and the policy retains them unless `--include-empty`.
+- **Metadata differences.** Equality is content only. Permissions, owner, group and
+  extended attributes are not part of it, so two members of a group may differ in them.
+  Removing a copy loses its metadata, so every report member carries
+  `metadata_differs_from_keeper` (which of permissions/owner/group/extended attributes
+  differ) and every plan action's `reason` says so ("differs from the keeper in owner (not
+  kept when this copy is removed)"). Timestamps are not compared: they differ between copies as a rule.
+- **Sparse and shared storage.** Content is compared logically: a sparse file and a dense
+  file with the same bytes are duplicates. Space figures are conservative.
+  `logical_redundant_bytes` is the logical length of eligible copies;
+  `estimated_allocated_bytes` counts allocated blocks (`st_blocks`) only of single-link
+  copies, because removing one name of a multi-link object frees nothing. Neither number
+  is promised as reclaimable: blocks already shared through reflinks or extent sharing,
+  snapshots, compression and open descriptors can all keep storage alive, and rdedupe
+  cannot see them. Extent mode never claims savings; the kernel reports what it shared.
 
 ## Scan-time versus action-time evidence
 
@@ -110,19 +147,28 @@ guarantee on a live tree.
 
 ## Cancellation and partial outcomes
 
-SIGINT sets a shared flag checked between reads and between actions. A cancelled scan
-returns a `cancelled` summary with the groups established so far (still exact) and
-refuses to plan. A cancelled `apply` stops before its next action; every started action
-is journaled.
+SIGINT sets a shared flag checked for every directory entry during discovery, between
+reads in every stage, while loading a cache, during accounting, and between actions. A
+cancelled scan exits 130 with a `cancelled` summary holding the groups established so far
+(still exact) and refuses to plan; the existing cache is left untouched. A cancelled
+`apply` stops before its next action; every started action is journaled, and
+`apply --resume` continues it. `tests/cli.rs` sends a real SIGINT mid-comparison.
 
 ## Platforms
 
+Quarantine, restore and purge open the containing directories once (`O_DIRECTORY |
+O_NOFOLLOW`) and check, rename and unlink by name relative to those descriptors
+(`fstatat`, `renameat2`/`renameatx_np`, `unlinkat`), so a parent swapped for a symlink
+after validation cannot redirect an operation. `rdedupe capabilities --path DIR` probes a
+real filesystem.
+
 - Linux: everything, including extent sharing (`FIDEDUPERANGE`) and `renameat2
   (RENAME_NOREPLACE)` quarantine moves.
-- Other Unix (macOS, BSD): scanning, plans and quarantine. Quarantine moves use
-  link-then-unlink, which never replaces an entry; an interruption between the two steps
-  leaves the object under both names, which `restore` resolves. Extent sharing reports
-  unsupported.
+- macOS: scanning, plans and quarantine, with `renameatx_np(RENAME_EXCL)` moves. Extent
+  sharing reports unsupported.
+- Other Unix (BSD and others): scanning, reports and plans. Quarantine is unsupported:
+  without an atomic no-replace rename the quarantine root cannot be published safely, so
+  `capabilities` says `unsupported` and apply fails explicitly.
 - Windows: not supported (no native-byte paths, no no-replace rename or advisory lock in
   the current implementation); the code fails explicitly rather than degrading.
 

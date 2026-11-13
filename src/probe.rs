@@ -5,6 +5,8 @@ use std::path::Path;
 
 /// Quarantine needs an atomic no-replace rename that also works on directories (the
 /// quarantine root is published that way).
+pub const QUARANTINE_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
 pub const QUARANTINE_PLATFORM: &str = if cfg!(target_os = "linux") {
     "supported (renameat2 RENAME_NOREPLACE; same filesystem only)"
 } else if cfg!(target_os = "macos") {

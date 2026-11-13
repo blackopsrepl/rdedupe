@@ -188,10 +188,16 @@ impl DirFd {
         Ok(())
     }
 
-    /// Makes entry changes in this directory durable.
+    /// Makes entry changes in this directory durable. On macOS this is `F_FULLFSYNC` (plain
+    /// `fsync` there does not flush the drive's write cache), matching `File::sync_all`.
     pub fn sync(&self) -> Result<()> {
+        #[cfg(target_os = "macos")]
         // SAFETY: valid descriptor.
-        if unsafe { libc::fsync(self.raw()) } != 0 {
+        let rc = unsafe { libc::fcntl(self.raw(), libc::F_FULLFSYNC) };
+        #[cfg(not(target_os = "macos"))]
+        // SAFETY: valid descriptor.
+        let rc = unsafe { libc::fsync(self.raw()) };
+        if rc != 0 {
             return Err(io(
                 "sync directory",
                 &self.path,

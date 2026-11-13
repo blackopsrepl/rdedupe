@@ -124,7 +124,7 @@ pub fn write_plan(scan: &ScanResult, output: &Path, action: ActionKind) -> Resul
                     format!("keeper chosen by {keeper_reason}; target is an exact copy");
                 if !differs.is_empty() {
                     reason.push_str(&format!(
-                        "; its {} differ from the keeper's and are not kept",
+                        "; differs from the keeper in {} (not kept when this copy is removed)",
                         differs.join(", ")
                     ));
                 }

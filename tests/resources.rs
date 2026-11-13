@@ -22,8 +22,8 @@ fn run_measured(args: &[&std::ffi::OsStr], nofile: u64) -> (i32, Vec<u8>, i64, O
     unsafe {
         command.pre_exec(move || {
             let limit = libc::rlimit {
-                rlim_cur: nofile,
-                rlim_max: nofile,
+                rlim_cur: nofile as libc::rlim_t,
+                rlim_max: nofile as libc::rlim_t,
             };
             if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
                 return Err(std::io::Error::last_os_error());

@@ -65,7 +65,7 @@ lint:
 	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
 test:
-	$(CARGO) test --locked --all-targets
+	$(CARGO) test --locked --all-targets --no-fail-fast
 
 resource-tests:
 	$(CARGO) test --locked --test resources -- --nocapture
