@@ -114,9 +114,19 @@ pub fn write_plan(scan: &ScanResult, output: &Path, action: ActionKind) -> Resul
         write_hashed(&mut out, &header, &mut hash)?;
         scan.store.for_each_group(|group| {
             let (keeper, keeper_reason) = scan.policy.select_streaming(&scan.store, group)?;
+            let keeper_xattrs = crate::platform::xattr_digest(&keeper.path);
             scan.store.for_each_member(group, |target| {
                 if target.id == keeper.id || scan.policy.retained_because(target).is_some() {
                     return Ok(());
+                }
+                let differs = crate::policy::metadata_differences(target, &keeper, keeper_xattrs);
+                let mut reason =
+                    format!("keeper chosen by {keeper_reason}; target is an exact copy");
+                if !differs.is_empty() {
+                    reason.push_str(&format!(
+                        "; its {} differ from the keeper's and are not kept",
+                        differs.join(", ")
+                    ));
                 }
                 let item = PlanAction {
                     group: group as u64,
@@ -124,7 +134,7 @@ pub fn write_plan(scan: &ScanResult, output: &Path, action: ActionKind) -> Resul
                     target_observation: target.observation.clone(),
                     keeper: EncodedPath::from_path(&keeper.path),
                     keeper_observation: keeper.observation.clone(),
-                    reason: format!("keeper chosen by {keeper_reason}; target is an exact copy"),
+                    reason,
                 };
                 write_hashed(&mut out, &item, &mut hash)?;
                 count += 1;
@@ -230,16 +240,42 @@ mod tempfile_dir {
     }
 }
 
+/// Where and how large the plan-verification index may grow.
+#[derive(Debug, Clone)]
+pub struct IndexSpace {
+    /// Base directory (default: the system temporary directory).
+    pub scratch_dir: Option<std::path::PathBuf>,
+    /// Maximum index size in bytes; exceeding it fails verification with a budget error.
+    pub temp_bytes: u64,
+}
+
+impl Default for IndexSpace {
+    fn default() -> Self {
+        Self {
+            scratch_dir: None,
+            temp_bytes: 8192 * 1024 * 1024,
+        }
+    }
+}
+
 impl Index {
-    fn create() -> Result<Self> {
-        let directory =
-            crate::platform::create_unique_dir(&std::env::temp_dir(), "rdedupe-plan-index")?;
+    fn create(space: &IndexSpace) -> Result<Self> {
+        let base = space.scratch_dir.clone().unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&base).map_err(|e| io("create scratch base", &base, e))?;
+        crate::platform::remove_abandoned_scratch(&base, "rdedupe-plan-index")?;
+        let directory = crate::platform::create_scratch_dir(&base, "rdedupe-plan-index")?;
         let directory = tempfile_dir::Dir(directory);
         let connection = rusqlite::Connection::open(directory.0.join("index.sqlite3"))?;
         connection.pragma_update(None, "synchronous", "OFF")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "cache_size", -4096)?;
         connection.pragma_update(None, "temp_store", "FILE")?;
+        let page_size: i64 = connection.pragma_query_value(None, "page_size", |r| r.get(0))?;
+        connection.pragma_update(
+            None,
+            "max_page_count",
+            (space.temp_bytes / page_size as u64).max(64) as i64,
+        )?;
         connection.execute_batch(
             "CREATE TABLE targets(target BLOB PRIMARY KEY, keeper BLOB NOT NULL, line BLOB NOT NULL) WITHOUT ROWID;
              CREATE INDEX targets_keeper ON targets(keeper);
@@ -256,12 +292,21 @@ impl Index {
 /// uniqueness, absence of keeper chains (no keeper is also a target), action count and
 /// checksum. Reads the file in one pass with bounded memory.
 pub fn verify_plan(path: &Path) -> Result<PlanHeader> {
+    verify_plan_in(path, &IndexSpace::default())
+}
+
+/// [`verify_plan`] with the verification index in `space`.
+pub fn verify_plan_in(path: &Path, space: &IndexSpace) -> Result<PlanHeader> {
     let file = File::open(path).map_err(|e| io("open plan", path, e))?;
-    verify_from(&mut BufReader::new(file), path).map(|(header, _, _)| header)
+    verify_from(&mut BufReader::new(file), path, space).map(|(header, _, _)| header)
 }
 
 /// Returns the header, the raw header line and the index of verified action lines.
-fn verify_from(reader: &mut impl BufRead, path: &Path) -> Result<(PlanHeader, Vec<u8>, Index)> {
+fn verify_from(
+    reader: &mut impl BufRead,
+    path: &Path,
+    space: &IndexSpace,
+) -> Result<(PlanHeader, Vec<u8>, Index)> {
     let mut line = Vec::new();
     read_line(reader, &mut line, path)?.ok_or_else(|| Error::Plan("empty plan".into()))?;
     let header: PlanHeader = serde_json::from_slice(&line)
@@ -287,7 +332,7 @@ fn verify_from(reader: &mut impl BufRead, path: &Path) -> Result<(PlanHeader, Ve
     let mut hash = blake3::Hasher::new();
     hash.update(&line);
     hash.update(b"\n");
-    let index = Index::create()?;
+    let index = Index::create(space)?;
     let mut actions = 0u64;
     let mut footer = None;
     while read_line(reader, &mut line, path)?.is_some() {
@@ -362,11 +407,20 @@ fn verify_from(reader: &mut impl BufRead, path: &Path) -> Result<(PlanHeader, Ve
 /// altered action executes.
 pub fn for_each_action(
     path: &Path,
+    function: impl FnMut(u64, &PlanHeader, PlanAction) -> Result<()>,
+) -> Result<PlanHeader> {
+    for_each_action_in(path, &IndexSpace::default(), function)
+}
+
+/// [`for_each_action`] with the verification index in `space`.
+pub fn for_each_action_in(
+    path: &Path,
+    space: &IndexSpace,
     mut function: impl FnMut(u64, &PlanHeader, PlanAction) -> Result<()>,
 ) -> Result<PlanHeader> {
     let file = File::open(path).map_err(|e| io("open plan", path, e))?;
     let mut reader = BufReader::new(file);
-    let (header, header_line, index) = verify_from(&mut reader, path)?;
+    let (header, header_line, index) = verify_from(&mut reader, path, space)?;
     let roots = plan_roots(&header)?;
     let protected = protected_roots(&header)?;
     reader

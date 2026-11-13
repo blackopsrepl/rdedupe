@@ -3,9 +3,10 @@
 Verify the installed version first: `rdedupe --version` prints `rdedupe 3.x.y`, and
 `rdedupe capabilities` prints `key=value` lines: `platform`, `plan-schema`,
 `journal-schema`, `machine-schema`, `fingerprint-layout`, `path-encoding`, `quarantine`
-(`same-filesystem rename-noreplace` or `unsupported`) and `extent`
-(`FIDEDUPERANGE (filesystem-dependent)` on Linux, otherwise `unsupported`; whether a given
-filesystem supports it is only known when an extent action runs).
+(starts with `supported` on Linux and macOS, otherwise `unsupported`) and `extent`
+(`FIDEDUPERANGE (filesystem-dependent; …)` on Linux, otherwise `unsupported`). With
+`--path DIR` it also probes that directory's filesystem with throwaway files and prints
+`quarantine-probe=` and `extent-probe=` (`supported` or `unsupported (reason)`).
 `rdedupe COMMAND --help` is the live source of truth; this file lists every flag it shows.
 
 ## Commands and flags
@@ -57,9 +58,12 @@ journals the intent durably, and acts. Refused actions change nothing.
 | Flag | Meaning |
 | --- | --- |
 | `--plan FILE` | Plan from `rdedupe plan`. |
-| `--journal FILE` | New journal; must not exist. Keep it. |
+| `--journal FILE` | New journal; must not exist (unless `--resume`). Keep it. |
 | `--force` | Skip the confirmation prompt (required when stdin is not a terminal). Validation still runs. |
 | `--buffer-kib N` | Buffer for the pre-action byte comparison (default 256). |
+| `--resume` | Continue an interrupted apply of the same plan in its existing JOURNAL: finished actions are not repeated, interrupted ones are reconciled from the filesystem, and anything indeterminate stops the run (exit 4) with a pointer to `recover`/`restore`. A journal from another plan is refused. |
+| `--scratch-dir DIR` | Where the plan-verification index is created (default: the system temporary directory). |
+| `--temp-mib N` | Maximum size of the plan-verification index (default 8192). |
 | `--format human\|jsonl` | Result format. |
 
 ### `rdedupe restore --journal JOURNAL`
@@ -96,7 +100,11 @@ Read-only. For each action, prints its last recorded state and where its object 
 
 ### `rdedupe capabilities`
 
-Prints the version, platform and supported formats. No flags.
+Prints the version, platform, schemas and platform-level quarantine/extent support.
+
+| Flag | Meaning |
+|---|---|
+| `--path DIR` | Also probe quarantine and extent support on DIR's filesystem, using throwaway files in a private scratch directory there (removed afterwards). |
 
 ### Legacy form (2.x compatibility)
 

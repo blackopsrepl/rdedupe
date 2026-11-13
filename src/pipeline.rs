@@ -57,45 +57,57 @@ pub fn scan_with(
     if let Some(cache_path) = &config.cache {
         excluded.insert(resolve_owned(cache_path)?);
     }
-    let counts = discover(
-        &store,
-        &DiscoveryOptions {
-            roots: &config.roots,
-            pattern: &config.pattern,
-            one_file_system: config.one_file_system,
-            excluded: &excluded,
-        },
-    )?;
-    let loaded = match (&config.cache, config.trust_cache && !config.fresh) {
-        (Some(path), true) => Some(cache::load(path, &store)?),
-        _ => None,
-    };
-    let mut metrics = store.base_metrics(config.budget.page_cache_bytes())?;
-    metrics.symlinks_skipped = counts.symlinks_skipped;
-    metrics.special_files_skipped = counts.special_files_skipped;
-    metrics.owned_dirs_skipped = counts.owned_dirs_skipped;
     let progress = Progress {
         enabled: config.progress,
     };
-    progress.report(format_args!(
-        "discovered {} paths, {} objects; {} candidates share a size",
-        metrics.paths, metrics.objects, metrics.candidate_objects
-    ));
-    let outcome = candidates::establish_groups(
-        &store,
-        &candidates::Options {
-            budget: &config.budget,
-            fingerprinter,
-            trust_cache: matches!(loaded, Some(cache::Loaded::Entries(_))),
-            cancel,
-            progress,
-        },
-        &mut metrics,
-    );
+    let mut loaded = None;
+    let mut metrics = crate::model::Metrics::default();
+    // Every stage checks `cancel`; an interrupt at any point yields a summary marked
+    // cancelled with whatever was established so far.
+    let outcome = (|| -> Result<()> {
+        let counts = discover(
+            &store,
+            &DiscoveryOptions {
+                roots: &config.roots,
+                pattern: &config.pattern,
+                one_file_system: config.one_file_system,
+                excluded: &excluded,
+                cancel,
+            },
+        )?;
+        loaded = match (&config.cache, config.trust_cache && !config.fresh) {
+            (Some(path), true) => Some(cache::load(path, &store, cancel)?),
+            _ => None,
+        };
+        metrics = store.base_metrics(config.budget.page_cache_bytes())?;
+        metrics.symlinks_skipped = counts.symlinks_skipped;
+        metrics.special_files_skipped = counts.special_files_skipped;
+        metrics.owned_dirs_skipped = counts.owned_dirs_skipped;
+        metrics.abandoned_scratch_removed = store.abandoned_scratch_removed();
+        progress.report(format_args!(
+            "discovered {} paths, {} objects; {} candidates share a size",
+            metrics.paths, metrics.objects, metrics.candidate_objects
+        ));
+        candidates::establish_groups(
+            &store,
+            &candidates::Options {
+                budget: &config.budget,
+                fingerprinter,
+                trust_cache: matches!(loaded, Some(cache::Loaded::Entries(_))),
+                cancel,
+                progress,
+            },
+            &mut metrics,
+        )?;
+        accounting::finish(&store, &policy, &mut metrics, cancel)
+    })();
     match outcome {
-        Ok(()) => accounting::finish(&store, &policy, &mut metrics)?,
+        Ok(()) => {}
         Err(Error::Cancelled) => {
             store.commit()?;
+            if metrics.paths == 0 {
+                metrics = store.base_metrics(config.budget.page_cache_bytes())?;
+            }
             store.set_completeness(Completeness::Cancelled)?;
         }
         Err(error) => return Err(error),

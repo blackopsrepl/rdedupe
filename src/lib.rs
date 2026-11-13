@@ -20,9 +20,11 @@ pub mod pipeline;
 pub mod plan;
 pub mod platform;
 pub mod policy;
+pub mod probe;
 pub mod quarantine;
 pub mod recovery;
 pub mod report;
+pub mod resume;
 pub mod scheduler;
 pub mod store;
 

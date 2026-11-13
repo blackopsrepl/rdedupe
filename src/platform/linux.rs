@@ -1,9 +1,6 @@
-use crate::error::{io, Error, Result};
-use std::ffi::CString;
+use crate::error::{Error, Result};
 use std::fs::File;
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
 
 /// `_IOWR(0x94, 54, struct file_dedupe_range)` from `linux/fs.h`. glibc declares the
 /// `ioctl` request as `unsigned long`, musl as `int`; the cast keeps the same 32 bits.
@@ -72,32 +69,4 @@ pub fn dedupe_range(src: &File, dst: &File, offset: u64, length: u64) -> Result<
             "FIDEDUPERANGE returned unknown destination status {status}"
         ))),
     }
-}
-
-fn c_path(path: &Path) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| Error::Plan(format!("path contains NUL: {path:?}")))
-}
-
-pub fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
-    let old = c_path(from)?;
-    let new = c_path(to)?;
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            old.as_ptr(),
-            libc::AT_FDCWD,
-            new.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if rc != 0 {
-        return Err(io(
-            "rename without replacement",
-            from,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    Ok(())
 }

@@ -22,6 +22,11 @@ pub struct Observation {
     pub changed_ns: i128,
     pub mode: u32,
     pub links: u64,
+    /// Owner and group (0 where the platform has none).
+    #[serde(default)]
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +72,8 @@ pub struct Metrics {
     pub special_files_skipped: u64,
     /// rdedupe-owned directories (marked quarantines, the scratch workspace) not scanned.
     pub owned_dirs_skipped: u64,
+    /// Scratch directories left by dead rdedupe processes and removed by this run.
+    pub abandoned_scratch_removed: u64,
     pub candidate_objects: u64,
     pub fingerprint_bytes_read: u64,
     pub comparison_bytes_read: u64,
@@ -97,6 +104,8 @@ pub struct GroupMember {
     pub is_keeper: bool,
     pub protected: bool,
     pub reason: String,
+    /// Metadata aspects in which this member differs from the keeper (empty for keepers).
+    pub metadata_differs_from_keeper: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -31,6 +31,17 @@ fn main() {
         Err(error) if error.is_broken_pipe() => EXIT_BROKEN_PIPE,
         Err(error) => {
             eprintln!("error: {error}");
+            let category = serde_json::to_value(error.category())
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            if error.retry_safe() {
+                eprintln!("error-category: {category}; retry-safe: yes (nothing was changed)");
+            } else {
+                eprintln!(
+                    "error-category: {category}; retry-safe: no (files may have changed: run `rdedupe recover --journal` before retrying)"
+                );
+            }
             EXIT_FAILED
         }
     };

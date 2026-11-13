@@ -16,6 +16,8 @@ pub struct DiscoveryOptions<'a> {
     pub one_file_system: bool,
     /// Exact owned artifact paths (scratch workspace, cache file) never inventoried.
     pub excluded: &'a HashSet<PathBuf>,
+    /// Checked for every entry, so an interrupt stops discovery promptly.
+    pub cancel: &'a crate::scheduler::Cancellation,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -52,6 +54,7 @@ pub fn discover(store: &Store, options: &DiscoveryOptions<'_>) -> Result<Discove
                 !owned
             });
         for entry in walker {
+            options.cancel.check()?;
             let entry = match entry {
                 Ok(value) => value,
                 Err(error) => {

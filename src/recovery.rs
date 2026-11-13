@@ -204,9 +204,12 @@ pub fn restore(journal_path: &Path, mut report: impl FnMut(&Finding)) -> Result<
                     .as_ref()
                     .ok_or_else(|| Error::Journal("quarantine record lacks a path".into()))?
                     .to_path()?;
-                std::fs::remove_file(&extra)
-                    .map_err(|e| io("remove extra quarantine name", &extra, e))?;
-                crate::platform::sync_parent(&extra)?;
+                if !quarantine::remove_name(&extra, &entry.target_observation)? {
+                    return Err(Error::Journal(format!(
+                        "the extra name {} changed; nothing removed",
+                        crate::paths::display_path(&extra)
+                    )));
+                }
                 record(
                     journal,
                     entry,
@@ -270,10 +273,7 @@ pub fn purge(
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     Err(_) => false,
                 };
-                if keeper_ok {
-                    std::fs::remove_file(&object)
-                        .map_err(|e| io("purge quarantine", &object, e))?;
-                    crate::platform::sync_parent(&object)?;
+                if keeper_ok && quarantine::remove_name(&object, &entry.target_observation)? {
                     record(
                         journal,
                         entry,

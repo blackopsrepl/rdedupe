@@ -37,8 +37,8 @@ Refuse to apply when any of these holds:
   its final check and the move is not detected. Ask for quiescence, or work on a
   snapshot mount, and say which.
 - The plan is older than the user's last change to the tree. Re-plan.
-- For extent plans: `rdedupe capabilities` does not list FIDEDUPERANGE or the filesystem
-  is not known to support it. A failed extent action leaves files untouched and is
+- For extent plans: `rdedupe capabilities --path ROOT` does not print
+  `extent-probe=supported`. A failed extent action leaves files untouched and is
   reported as `failed`; it never falls back to quarantine, deletion or hard links.
 - There is no room for the journal. Quarantine itself needs no extra space (it renames
   within each target's directory).

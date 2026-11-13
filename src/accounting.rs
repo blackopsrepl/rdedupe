@@ -10,8 +10,14 @@ use crate::store::Store;
 /// link; copies with other hard links free nothing when one name is removed. Neither number
 /// is a promise of physical reclamation: shared extents, compression, snapshots and open
 /// descriptors can all keep blocks alive.
-pub fn finish(store: &Store, policy: &Policy, metrics: &mut Metrics) -> Result<()> {
+pub fn finish(
+    store: &Store,
+    policy: &Policy,
+    metrics: &mut Metrics,
+    cancel: &crate::scheduler::Cancellation,
+) -> Result<()> {
     store.for_each_group(|group| {
+        cancel.check()?;
         let (keeper, _) = policy.select_streaming(store, group)?;
         metrics.groups += 1;
         store.for_each_member(group, |member| {

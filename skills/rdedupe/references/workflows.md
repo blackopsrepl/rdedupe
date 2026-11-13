@@ -66,10 +66,8 @@ duplicates of each other because each run creates a new file.
 
 ## 6. Extent sharing (extent level, Linux)
 
-- Prerequisites: the `extent=` line of `rdedupe capabilities` starts with `FIDEDUPERANGE`
-  (`unsupported` means the platform cannot); the filesystem
-  supports it (Btrfs, XFS with reflink); the user asked to share storage while keeping
-  every file.
+- Prerequisites: `rdedupe capabilities --path ROOT` prints `extent-probe=supported`
+  (Btrfs, XFS with reflink); the user asked to share storage while keeping every file.
 - Side effects: no file is moved, renamed or deleted; their extents become shared, and a
   later write to either file copies only the written blocks.
 - Run: `rdedupe plan ROOT --action extent --output PLAN`, then `apply` as in recipe 3.

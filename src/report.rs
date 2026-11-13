@@ -32,27 +32,41 @@ struct Member<'a> {
     keeper: bool,
     protected: bool,
     reason: String,
+    metadata_differs: Vec<&'static str>,
 }
 
 fn each_member(scan: &ScanResult, mut f: impl FnMut(&Member<'_>) -> Result<()>) -> Result<()> {
     scan.store.for_each_group(|group| {
         let (keeper, keeper_reason) = scan.policy.select_streaming(&scan.store, group)?;
+        let keeper_xattrs = crate::platform::xattr_digest(&keeper.path);
         scan.store.for_each_member(group, |record| {
             let is_keeper = record.id == keeper.id;
             let protected = scan.policy.is_protected(&record.path);
-            let reason = if is_keeper {
+            let metadata_differs = if is_keeper {
+                Vec::new()
+            } else {
+                crate::policy::metadata_differences(record, &keeper, keeper_xattrs)
+            };
+            let mut reason = if is_keeper {
                 format!("keeper: {keeper_reason}")
             } else if let Some(why) = scan.policy.retained_because(record) {
                 format!("retained: {why}")
             } else {
                 format!("eligible copy of {}", display_path(&keeper.path))
             };
+            if !metadata_differs.is_empty() {
+                reason.push_str(&format!(
+                    "; differs from the keeper in {}",
+                    metadata_differs.join(", ")
+                ));
+            }
             f(&Member {
                 group,
                 record,
                 keeper: is_keeper,
                 protected,
                 reason,
+                metadata_differs,
             })
         })
     })
@@ -203,6 +217,11 @@ fn write_jsonl(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
                 is_keeper: m.keeper,
                 protected: m.protected,
                 reason: m.reason.clone(),
+                metadata_differs_from_keeper: m
+                    .metadata_differs
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             },
         )?;
         out.write_all(b"\n")?;
@@ -232,11 +251,12 @@ fn write_jsonl(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// NUL-terminated native paths of every eligible copy (never keepers or protected members),
-/// suitable for `xargs -0`. Only meaningful for complete exact scans.
+/// NUL-terminated native paths of every eligible copy (never keepers or members the
+/// policy retains), exactly the targets a plan would contain, suitable for `xargs -0`.
+/// Only meaningful for complete exact scans.
 fn write_nul(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
     each_member(scan, |m| {
-        if !m.keeper && !m.protected {
+        if !m.keeper && scan.policy.retained_because(m.record).is_none() {
             out.write_all(path_bytes(&m.record.path))?;
             out.write_all(&[0])?;
         }

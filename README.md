@@ -93,7 +93,9 @@ cargo install --locked --path .        # from a checkout; Rust 1.85 or newer
 Release archives (`rdedupe-VERSION-TARGET.tar.gz`) contain the binary, this README, the
 docs and the skill, with a SHA-256 checksum.
 
-Platforms: Linux (everything), macOS and other Unix (everything except extent sharing).
+Platforms: Linux (everything); macOS (everything except extent sharing); other Unix
+systems (scan, report and plan; no quarantine, because they lack an atomic no-replace
+rename for directories). `rdedupe capabilities --path DIR` probes a specific filesystem.
 
 ## Documentation
 

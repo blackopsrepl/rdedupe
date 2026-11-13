@@ -62,15 +62,15 @@ impl Budget {
 
     pub fn validate(&self) -> Result<()> {
         if !(4096..=8 * 1024 * 1024).contains(&self.buffer_bytes) {
-            return Err(Error::Config(
+            return Err(Error::Budget(
                 "buffer size must be between 4 KiB and 8 MiB".into(),
             ));
         }
         if self.readers == 0 || self.readers > 64 {
-            return Err(Error::Config("readers must be between 1 and 64".into()));
+            return Err(Error::Budget("readers must be between 1 and 64".into()));
         }
         if self.page_cache_bytes() < MIN_PAGE_CACHE_BYTES {
-            return Err(Error::Config(format!(
+            return Err(Error::Budget(format!(
                 "memory budget {} bytes cannot hold {} bytes of read buffers, a {} byte allowance and the minimum {} byte page cache",
                 self.memory_bytes,
                 self.buffer_total(),
@@ -79,7 +79,7 @@ impl Budget {
             )));
         }
         if self.descriptors < self.required_descriptors() {
-            return Err(Error::Config(format!(
+            return Err(Error::Budget(format!(
                 "descriptor budget {} is below the {} descriptors required for {} readers",
                 self.descriptors,
                 self.required_descriptors(),
@@ -87,7 +87,7 @@ impl Budget {
             )));
         }
         if self.temp_bytes < 16 * 1024 * 1024 {
-            return Err(Error::Config(
+            return Err(Error::Budget(
                 "temporary-storage budget must be at least 16 MiB".into(),
             ));
         }

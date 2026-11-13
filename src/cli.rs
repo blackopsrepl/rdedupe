@@ -51,7 +51,15 @@ pub enum Command {
     /// Inspect a journal and report each action's recorded state and current facts.
     Recover(RecoverArgs),
     /// Print version, platform, format and filesystem capabilities.
-    Capabilities,
+    Capabilities(CapabilitiesArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CapabilitiesArgs {
+    /// Probe quarantine and extent support on the filesystem holding this directory, with
+    /// throwaway files in a private scratch directory there (removed afterwards).
+    #[arg(long, value_name = "DIR")]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -153,6 +161,15 @@ pub struct ApplyArgs {
     /// Read buffer for the byte comparison repeated before every action.
     #[arg(long, default_value_t = 256, value_name = "KIB")]
     pub buffer_kib: usize,
+    /// Continue an interrupted apply of the same plan in its existing journal.
+    #[arg(long)]
+    pub resume: bool,
+    /// Where the plan-verification index is created (default: the system temporary directory).
+    #[arg(long, value_name = "DIR")]
+    pub scratch_dir: Option<PathBuf>,
+    /// Maximum size of the plan-verification index.
+    #[arg(long, default_value_t = 8192, value_name = "MIB")]
+    pub temp_mib: u64,
     /// Result format: one record per action, then a summary.
     #[arg(long, value_enum, default_value = "human")]
     pub format: ResultFormat,

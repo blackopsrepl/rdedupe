@@ -22,13 +22,17 @@ pub const PAGE: u64 = 256;
 const BATCH: u64 = 4096;
 
 const RECORD_COLUMNS: &str =
-    "files.id,files.path,files.device,files.inode,files.size,files.allocated,files.modified_ns,files.changed_ns,files.mode,files.links,files.alias_of";
+    "files.id,files.path,files.device,files.inode,files.size,files.allocated,files.modified_ns,files.changed_ns,files.mode,files.links,files.alias_of,files.uid,files.gid";
+
+/// Number of columns in [`RECORD_COLUMNS`]; extra selected columns start at this index.
+const RECORD_COLUMN_COUNT: usize = 13;
 
 pub struct Store {
     conn: Connection,
     workspace: PathBuf,
     keep: bool,
     pending: Cell<u64>,
+    abandoned_removed: u64,
 }
 
 fn record_from_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
@@ -49,6 +53,8 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
             changed_ns: changed.parse().unwrap_or_default(),
             mode: row.get::<_, i64>(8)? as u32,
             links: row.get::<_, i64>(9)? as u64,
+            uid: row.get::<_, i64>(11)? as u32,
+            gid: row.get::<_, i64>(12)? as u32,
         },
         alias_of: row.get(10)?,
     })
@@ -68,7 +74,9 @@ impl Store {
             .clone()
             .unwrap_or_else(std::env::temp_dir);
         fs::create_dir_all(&base).map_err(|e| io("create scratch base", &base, e))?;
-        let workspace = crate::platform::create_unique_dir(&base, "rdedupe-scratch")?;
+        let abandoned = crate::platform::remove_abandoned_scratch(&base, "rdedupe-scratch")?
+            + crate::platform::remove_abandoned_scratch(&base, "rdedupe-plan-index")?;
+        let workspace = crate::platform::create_scratch_dir(&base, "rdedupe-scratch")?;
         let database = workspace.join("inventory.sqlite3");
         let conn = Connection::open_with_flags(
             &database,
@@ -81,6 +89,7 @@ impl Store {
             workspace,
             keep: false,
             pending: Cell::new(0),
+            abandoned_removed: abandoned,
         };
         // The scratch database is disposable: durability is irrelevant, bounded memory and
         // bounded disk are what matter. No sync, no rollback journal (nothing is ever rolled
@@ -110,7 +119,7 @@ impl Store {
             .conn
             .pragma_update(None, "max_page_count", max_pages as i64)?;
         store.conn.execute_batch(
-            "CREATE TABLE files (id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE, device INTEGER NOT NULL, inode INTEGER NOT NULL, size INTEGER NOT NULL, allocated INTEGER NOT NULL, modified_ns TEXT NOT NULL, changed_ns TEXT NOT NULL, mode INTEGER NOT NULL, links INTEGER NOT NULL, alias_of INTEGER);
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE, device INTEGER NOT NULL, inode INTEGER NOT NULL, size INTEGER NOT NULL, allocated INTEGER NOT NULL, modified_ns TEXT NOT NULL, changed_ns TEXT NOT NULL, mode INTEGER NOT NULL, links INTEGER NOT NULL, alias_of INTEGER, uid INTEGER NOT NULL, gid INTEGER NOT NULL);
              CREATE INDEX files_identity ON files(device, inode, path);
              CREATE INDEX files_candidates ON files(size, alias_of, path);
              CREATE TABLE unresolved (id INTEGER PRIMARY KEY, path BLOB NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL, retry_safe INTEGER NOT NULL);
@@ -146,6 +155,11 @@ impl Store {
             self.conn.execute_batch("BEGIN")?;
         }
         Ok(())
+    }
+
+    /// Scratch directories of dead rdedupe processes removed when this store was created.
+    pub fn abandoned_scratch_removed(&self) -> u64 {
+        self.abandoned_removed
     }
 
     /// Executes one statement through the prepared-statement cache: the engine runs the
@@ -188,7 +202,7 @@ impl Store {
 
     pub fn insert_file(&self, path: &Path, obs: &Observation) -> Result<()> {
         self.exec(
-            "INSERT OR IGNORE INTO files(path,device,inode,size,allocated,modified_ns,changed_ns,mode,links) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT OR IGNORE INTO files(path,device,inode,size,allocated,modified_ns,changed_ns,mode,links,uid,gid) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 path_bytes(path),
                 obs.identity.device as i64,
@@ -198,7 +212,9 @@ impl Store {
                 obs.modified_ns.to_string(),
                 obs.changed_ns.to_string(),
                 obs.mode as i64,
-                obs.links as i64
+                obs.links as i64,
+                obs.uid as i64,
+                obs.gid as i64
             ],
         )?;
         self.wrote()
@@ -421,7 +437,7 @@ impl Store {
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
             .query_map(params![after, PAGE as i64], |r| {
-                Ok((r.get::<_, i64>(11)?, record_from_row(r)?))
+                Ok((r.get::<_, i64>(RECORD_COLUMN_COUNT)?, record_from_row(r)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -601,7 +617,10 @@ impl Store {
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
             .query_map(params![after.unwrap_or(&[]), PAGE as i64], |r| {
-                Ok((record_from_row(r)?, r.get::<_, Option<Vec<u8>>>(11)?))
+                Ok((
+                    record_from_row(r)?,
+                    r.get::<_, Option<Vec<u8>>>(RECORD_COLUMN_COUNT)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)

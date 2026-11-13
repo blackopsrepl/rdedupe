@@ -7,6 +7,10 @@
 //! * In the default **exact** mode the cache is only written (refreshed), never consulted,
 //!   because a stale entry could otherwise eliminate a genuine candidate (a "stale
 //!   negative"), and metadata validators cannot prove unchanged content.
+//! * Validators (device, inode, size, mtime, ctime) cannot prove content is unchanged:
+//!   an inode number can be reused by a new file, timestamps can be restored or coarse
+//!   (FAT, some network filesystems), and network filesystems may report stale metadata.
+//!   That is why trusting the cache makes a scan heuristic.
 //! * With `--trust-cache` the scan is **heuristic**: fingerprints whose validators all match
 //!   are reused instead of re-read. Reported groups are still byte-verified, but stale
 //!   entries may hide duplicates, so plans refuse heuristic scans.
@@ -50,7 +54,7 @@ pub enum Loaded {
     Ignored(String),
 }
 
-pub fn load(path: &Path, store: &Store) -> Result<Loaded> {
+pub fn load(path: &Path, store: &Store, cancel: &crate::scheduler::Cancellation) -> Result<Loaded> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Loaded::Missing),
@@ -68,6 +72,7 @@ pub fn load(path: &Path, store: &Store) -> Result<Loaded> {
     store.begin()?;
     let mut count = 0;
     for line in lines {
+        cancel.check()?;
         let parsed = line
             .ok()
             .and_then(|line| serde_json::from_slice::<Entry>(&line).ok())
@@ -96,6 +101,8 @@ pub fn load(path: &Path, store: &Store) -> Result<Loaded> {
                     changed_ns: entry.changed_ns,
                     mode: 0,
                     links: 0,
+                    uid: 0,
+                    gid: 0,
                 },
                 digest,
             },
@@ -104,6 +111,46 @@ pub fn load(path: &Path, store: &Store) -> Result<Loaded> {
     }
     store.commit()?;
     Ok(Loaded::Entries(count))
+}
+
+/// Removes `<cache>.tmp-<pid>` files left by rdedupe processes that no longer exist (an
+/// update interrupted by `kill -9` or power loss). The published cache is never touched
+/// by an interrupted update: it is replaced only by a complete, synced file.
+fn remove_stale_temporaries(path: &Path) -> Result<()> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Ok(());
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let Some(name) = name.to_str() else {
+        return Ok(());
+    };
+    let lead = format!("{name}.tmp-");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_str()
+            .and_then(|n| n.strip_prefix(&lead))
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stale = entry.path();
+        if pid != std::process::id()
+            && crate::platform::process_is_gone(pid)
+            && std::fs::symlink_metadata(&stale).is_ok_and(|m| m.is_file())
+        {
+            std::fs::remove_file(&stale)
+                .map_err(|e| io("remove stale temporary file", &stale, e))?;
+        }
+    }
+    Ok(())
 }
 
 /// What occupies the cache path before a scan. Checked before any work and again right
@@ -166,6 +213,7 @@ pub fn write(path: &Path, store: &Store, slot: Slot) -> Result<u64> {
         _ => Path::new("."),
     };
     std::fs::create_dir_all(parent).map_err(|e| io("create cache directory", parent, e))?;
+    remove_stale_temporaries(path)?;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".tmp-{}", std::process::id()));
     let temporary = parent.join(name);

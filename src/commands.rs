@@ -28,39 +28,7 @@ pub fn dispatch(cli: Cli, cancel: &Cancellation) -> Result<i32> {
         Some(Command::Restore(args)) => restore_command(args),
         Some(Command::Purge(args)) => purge_command(args, cancel),
         Some(Command::Recover(args)) => recover_command(args),
-        Some(Command::Capabilities) => {
-            let mut out = io::stdout().lock();
-            writeln!(out, "rdedupe {}", env!("CARGO_PKG_VERSION"))?;
-            writeln!(out, "platform={}", std::env::consts::OS)?;
-            writeln!(out, "plan-schema={}", crate::plan::SCHEMA)?;
-            writeln!(out, "journal-schema={}", crate::journal::SCHEMA)?;
-            writeln!(out, "machine-schema={}", crate::pipeline::MACHINE_SCHEMA)?;
-            writeln!(out, "fingerprint-layout={}", crate::fingerprint::LAYOUT)?;
-            writeln!(
-                out,
-                "path-encoding={}",
-                if cfg!(unix) { "unix-bytes" } else { "utf-8" }
-            )?;
-            writeln!(
-                out,
-                "quarantine={}",
-                if cfg!(unix) {
-                    "same-filesystem rename-noreplace"
-                } else {
-                    "unsupported"
-                }
-            )?;
-            writeln!(
-                out,
-                "extent={}",
-                if cfg!(target_os = "linux") {
-                    "FIDEDUPERANGE (filesystem-dependent)"
-                } else {
-                    "unsupported"
-                }
-            )?;
-            Ok(EXIT_OK)
-        }
+        Some(Command::Capabilities(args)) => capabilities_command(args),
         None => legacy(cli, cancel),
     }
 }
@@ -206,21 +174,31 @@ fn emit<T: Serialize>(
 }
 
 fn apply_command(args: ApplyArgs, cancel: &Cancellation) -> Result<i32> {
-    let header = crate::plan::verify_plan(&args.plan)?;
+    let options = crate::delete::ApplyOptions {
+        buffer_bytes: args.buffer_kib.saturating_mul(1024),
+        index: crate::plan::IndexSpace {
+            scratch_dir: args.scratch_dir.clone(),
+            temp_bytes: args.temp_mib.saturating_mul(1024 * 1024),
+        },
+        resume: args.resume,
+    };
+    let header = crate::plan::verify_plan_in(&args.plan, &options.index)?;
     if !args.force
         && !confirm(&format!(
-            "apply this {:?} plan (journal {})",
+            "{} this {:?} plan (journal {})",
+            if args.resume { "resume" } else { "apply" },
             header.action,
             display_path(&args.journal)
         ))?
     {
         return Ok(EXIT_DECLINED);
     }
-    let summary = crate::delete::execute(
+    let summary = crate::delete::execute_in(
         &args.plan,
         &args.journal,
-        args.buffer_kib.saturating_mul(1024),
+        &options,
         cancel,
+        &crate::journal::NoHooks,
         |outcome: &ActionOutcome| {
             emit(args.format, "outcome", outcome, || {
                 let path = outcome
@@ -378,4 +356,23 @@ pub fn completion_code(result: &ScanResult) -> i32 {
         Completeness::Cancelled => EXIT_CANCELLED,
         Completeness::Failed => EXIT_FAILED,
     }
+}
+
+fn capabilities_command(args: crate::cli::CapabilitiesArgs) -> Result<i32> {
+    let mut out = io::stdout().lock();
+    writeln!(out, "rdedupe {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(out, "platform={}", std::env::consts::OS)?;
+    writeln!(out, "plan-schema={}", crate::plan::SCHEMA)?;
+    writeln!(out, "journal-schema={}", crate::journal::SCHEMA)?;
+    writeln!(out, "machine-schema={}", crate::pipeline::MACHINE_SCHEMA)?;
+    writeln!(out, "fingerprint-layout={}", crate::fingerprint::LAYOUT)?;
+    writeln!(out, "path-encoding=unix-bytes")?;
+    writeln!(out, "quarantine={}", crate::probe::QUARANTINE_PLATFORM)?;
+    writeln!(out, "extent={}", crate::probe::EXTENT_PLATFORM)?;
+    if let Some(path) = &args.path {
+        let probe = crate::probe::filesystem(path)?;
+        writeln!(out, "quarantine-probe={}", probe.quarantine)?;
+        writeln!(out, "extent-probe={}", probe.extent)?;
+    }
+    Ok(EXIT_OK)
 }

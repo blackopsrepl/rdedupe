@@ -15,11 +15,37 @@ pub struct Policy {
     /// Keeper preference order among unprotected roots (earlier wins).
     pub prefer: Vec<PathBuf>,
     /// Prefer the most recently modified member before falling back to native path order.
+    /// A member without a modification time (only possible off Unix) sorts as the oldest.
     pub prefer_newest: bool,
     /// Make empty files eligible copies. Off by default: empty files are often meaningful
     /// markers (`__init__.py`, `.gitkeep`, lock files) and removing them reclaims nothing.
     #[serde(default)]
     pub include_empty: bool,
+}
+
+/// How a member's metadata differs from its keeper's: permission bits, owner, group, and
+/// extended attributes (including ACLs where the platform stores them as attributes).
+/// Content is identical; removing the member keeps only the keeper's metadata.
+pub fn metadata_differences(
+    member: &FileRecord,
+    keeper: &FileRecord,
+    keeper_xattrs: Option<[u8; 32]>,
+) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let (m, k) = (&member.observation, &keeper.observation);
+    if m.mode & 0o7777 != k.mode & 0o7777 {
+        out.push("permissions");
+    }
+    if m.uid != k.uid {
+        out.push("owner");
+    }
+    if m.gid != k.gid {
+        out.push("group");
+    }
+    if crate::platform::xattr_digest(&member.path) != keeper_xattrs {
+        out.push("extended attributes");
+    }
+    out
 }
 
 impl Policy {

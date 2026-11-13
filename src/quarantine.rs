@@ -8,6 +8,7 @@
 use crate::error::{io, Error, Result};
 use crate::model::FileIdentity;
 use crate::paths::EncodedPath;
+use crate::platform::dirfd::{self, DirFd};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -45,7 +46,11 @@ fn quarantine_root(parent: &Path) -> Result<PathBuf> {
             .map_err(|e| io("write quarantine marker", &marker, e))?;
         crate::platform::sync_parent(&marker)
     })();
-    let published = staged.and_then(|()| crate::platform::rename_noreplace(&staging, &root));
+    let published = staged.and_then(|()| {
+        let dir = DirFd::open(parent)?;
+        let (_, staging_name) = dirfd::split(&staging)?;
+        dir.rename_noreplace(staging_name, &dir, std::ffi::OsStr::new(QUARANTINE_DIR))
+    });
     if published.is_err() {
         let _ = fs::remove_file(staging.join(MARKER_FILE));
         let _ = fs::remove_dir(&staging);
@@ -157,31 +162,67 @@ pub fn validate_recorded(target: &Path, recorded: &Path, sequence: u64) -> Resul
 /// Moves `target` into quarantine without replacing anything, then verifies that the moved
 /// object is the one that was validated. If another object was swapped in between, it is
 /// moved back and the action fails.
+///
+/// Both directories are opened once and every step is relative to those descriptors, so a
+/// parent swapped for a symlink after validation cannot redirect the move.
 pub fn move_into(target: &Path, destination: &Path, expected: FileIdentity) -> Result<()> {
-    crate::platform::rename_noreplace(target, destination)?;
-    let moved = crate::platform::observe_path(destination)?;
-    if moved.identity != expected {
-        crate::platform::rename_noreplace(destination, target)?;
+    let (parent, name) = dirfd::split(target)?;
+    let (quarantine, slot) = dirfd::split(destination)?;
+    let from = DirFd::open(parent)?;
+    let to = DirFd::open(quarantine)?;
+    if from.stat(name)?.map(|o| o.identity) != Some(expected) {
+        return Err(Error::Unstable(format!(
+            "{target:?} is no longer the validated object"
+        )));
+    }
+    from.rename_noreplace(name, &to, slot)?;
+    if to.stat(slot)?.map(|o| o.identity) != Some(expected) {
+        to.rename_noreplace(slot, &from, name)?;
         return Err(Error::Unstable(format!(
             "{target:?} was replaced between validation and quarantine; moved back"
         )));
     }
-    crate::platform::sync_parent(target)?;
-    crate::platform::sync_parent(destination)
+    from.sync()?;
+    to.sync()
 }
 
 /// Moves a quarantined object back. Never replaces an entry that now exists at `original`.
 pub fn restore(source: &Path, original: &Path) -> Result<()> {
-    crate::platform::rename_noreplace(source, original).map_err(|error| match error {
-        Error::Io { source: e, .. } if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            Error::Journal(format!(
-                "restore refuses to overwrite {original:?}, which now exists"
-            ))
+    let (quarantine, slot) = dirfd::split(source)?;
+    let (parent, name) = dirfd::split(original)?;
+    let from = DirFd::open(quarantine)?;
+    let to = DirFd::open(parent)?;
+    from.rename_noreplace(slot, &to, name)
+        .map_err(|error| match error {
+            Error::Io { source: e, .. } if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Error::Journal(format!(
+                    "restore refuses to overwrite {original:?}, which now exists"
+                ))
+            }
+            other => other,
+        })?;
+    from.sync()?;
+    to.sync()
+}
+
+/// Removes one name of a quarantined object, relative to its directory descriptor, only if
+/// that name still refers to the object described by `expected` (identity, size and
+/// modification time).
+pub fn remove_name(object: &Path, expected: &crate::model::Observation) -> Result<bool> {
+    let (directory, name) = dirfd::split(object)?;
+    let dir = DirFd::open(directory)?;
+    match dir.stat(name)? {
+        Some(now)
+            if now.identity == expected.identity
+                && now.size == expected.size
+                && now.modified_ns == expected.modified_ns =>
+        {
+            dir.unlink(name)?;
+            dir.sync()?;
+            Ok(true)
         }
-        other => other,
-    })?;
-    crate::platform::sync_parent(source)?;
-    crate::platform::sync_parent(original)
+        _ => Ok(false),
+    }
 }
 
 /// After an object left quarantine (restored or purged), removes its journal's namespace

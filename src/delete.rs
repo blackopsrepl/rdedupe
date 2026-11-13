@@ -11,10 +11,31 @@ use crate::error::{io, Error, Result};
 use crate::fileinfo::{open_observed, open_observed_rw};
 use crate::journal::{Journal, JournalEntry, JournalHooks, NoHooks, State, SCHEMA};
 use crate::model::{ActionKind, ActionOutcome, ActionStatus, ApplySummary};
-use crate::plan::{for_each_action, PlanAction};
+use crate::plan::{for_each_action_in, IndexSpace, PlanAction};
 use crate::quarantine;
 use crate::scheduler::Cancellation;
 use std::path::Path;
+
+/// How `apply` runs.
+#[derive(Debug, Clone)]
+pub struct ApplyOptions {
+    /// Buffer for the byte comparison repeated before every action.
+    pub buffer_bytes: usize,
+    /// Where the plan-verification (and resume) indexes live, and how large they may grow.
+    pub index: IndexSpace,
+    /// Continue an interrupted run in its existing journal instead of creating a new one.
+    pub resume: bool,
+}
+
+impl ApplyOptions {
+    pub fn new(buffer_bytes: usize) -> Self {
+        Self {
+            buffer_bytes,
+            index: IndexSpace::default(),
+            resume: false,
+        }
+    }
+}
 
 pub fn execute(
     plan: &Path,
@@ -23,7 +44,14 @@ pub fn execute(
     cancel: &Cancellation,
     sink: impl FnMut(&ActionOutcome) -> Result<()>,
 ) -> Result<ApplySummary> {
-    execute_with_hooks(plan, journal, buffer_bytes, cancel, &NoHooks, sink)
+    execute_in(
+        plan,
+        journal,
+        &ApplyOptions::new(buffer_bytes),
+        cancel,
+        &NoHooks,
+        sink,
+    )
 }
 
 pub fn execute_with_hooks(
@@ -32,20 +60,61 @@ pub fn execute_with_hooks(
     buffer_bytes: usize,
     cancel: &Cancellation,
     hooks: &dyn JournalHooks,
+    sink: impl FnMut(&ActionOutcome) -> Result<()>,
+) -> Result<ApplySummary> {
+    execute_in(
+        plan,
+        journal_path,
+        &ApplyOptions::new(buffer_bytes),
+        cancel,
+        hooks,
+        sink,
+    )
+}
+
+pub fn execute_in(
+    plan: &Path,
+    journal_path: &Path,
+    options: &ApplyOptions,
+    cancel: &Cancellation,
+    hooks: &dyn JournalHooks,
     mut sink: impl FnMut(&ActionOutcome) -> Result<()>,
 ) -> Result<ApplySummary> {
+    let buffer_bytes = options.buffer_bytes;
     if !(4096..=8 * 1024 * 1024).contains(&buffer_bytes) {
-        return Err(Error::Config(
+        return Err(Error::Budget(
             "buffer size must be between 4 KiB and 8 MiB".into(),
         ));
     }
     // Verify before creating the journal so an invalid plan leaves no artifacts.
-    crate::plan::verify_plan(plan)?;
-    let mut journal = Journal::create(journal_path)?;
+    crate::plan::verify_plan_in(plan, &options.index)?;
+    let (mut journal, previous) = if options.resume {
+        let journal = Journal::open_existing(journal_path)?;
+        let previous = crate::resume::Previous::load(&journal, &options.index)?;
+        (journal, Some(previous))
+    } else {
+        (Journal::create(journal_path)?, None)
+    };
     let mut summary = ApplySummary::default();
     let mut stopped_group: Option<u64> = None;
-    for_each_action(plan, |number, header, action| {
+    for_each_action_in(plan, &options.index, |number, header, action| {
         cancel.check()?;
+        if let Some(previous) = &previous {
+            match previous.prepare(&mut journal, hooks, number, &action)? {
+                crate::resume::Prior::None => {}
+                crate::resume::Prior::Finished(status) => {
+                    let done = outcome(
+                        &action,
+                        header.action,
+                        status,
+                        0,
+                        Some("finished by the interrupted run".into()),
+                    );
+                    summary.record(&done);
+                    return sink(&done);
+                }
+            }
+        }
         let outcome = if stopped_group == Some(action.group) {
             outcome(
                 &action,
@@ -80,6 +149,17 @@ pub fn execute_with_hooks(
         }
         summary.record(&outcome);
         sink(&outcome)
+    })
+    .map_err(|error| {
+        let completed = summary.quarantined + summary.shared;
+        match error {
+            Error::Cancelled => Error::Cancelled,
+            cause if completed > 0 => Error::PartialExecution {
+                completed,
+                cause: Box::new(cause),
+            },
+            cause => cause,
+        }
     })?;
     Ok(summary)
 }
@@ -101,7 +181,12 @@ fn outcome(
     }
 }
 
-fn entry(number: u64, action: &PlanAction, kind: ActionKind, state: State) -> JournalEntry {
+pub(crate) fn entry(
+    number: u64,
+    action: &PlanAction,
+    kind: ActionKind,
+    state: State,
+) -> JournalEntry {
     JournalEntry {
         schema: SCHEMA.into(),
         sequence: 0,
@@ -158,9 +243,8 @@ fn quarantine_one(
             // move (for example a concurrent apply of an opposite plan). Never leave the
             // content with no live copy: move the target back.
             let message = "keeper changed during apply; target moved back".to_string();
-            match crate::platform::rename_noreplace(&destination, &target) {
+            match quarantine::restore(&destination, &target) {
                 Ok(()) => {
-                    crate::platform::sync_parent(&target)?;
                     quarantine::prune(&destination);
                     let mut restored = base;
                     restored.state = State::Restored;
