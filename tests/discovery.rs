@@ -336,3 +336,37 @@ fn hard_link_aliases_are_named_in_every_output() {
         .collect();
     assert_eq!(listed, [bytes(&b).as_slice()], "only the eligible copy");
 }
+
+/// An unreadable directory whose name holds terminal control bytes and a newline: the
+/// human report escapes it everywhere, including inside the OS error message, so it cannot
+/// colour the terminal or forge a report line.
+#[test]
+fn control_bytes_in_unreadable_directory_names_are_escaped_in_messages() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIP: running as root, directory permissions do not restrict reads");
+        return;
+    }
+    let fixture = Fixture::new();
+    let name = "evil\x1b[31mRED\nfake";
+    fixture.write(format!("{name}/inside"), b"x");
+    fixture.write("plain", b"y");
+    let dir = fixture.path(name);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let output = rdedupe().args(["scan", fixture.str()]).output().unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output.stdout.contains(&0x1b), "raw ESC in stdout");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let unresolved: Vec<_> = text.lines().filter(|l| l.contains("UNRESOLVED")).collect();
+    assert_eq!(unresolved.len(), 1, "{text}");
+    assert!(
+        unresolved[0].contains("evil\\x1b[31mRED\\nfake")
+            && unresolved[0].ends_with("Permission denied (os error 13)"),
+        "{text}"
+    );
+    assert!(
+        !text.lines().any(|l| l.starts_with("fake")),
+        "forged line: {text}"
+    );
+}

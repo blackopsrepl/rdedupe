@@ -28,6 +28,11 @@ pub trait Fingerprinter: Sync {
         cancel: &Cancellation,
     ) -> Result<([u8; 32], u64)>;
 
+    /// Test seam: called right before each byte comparison against `representative`, so
+    /// tests can change a representative between comparisons. Does nothing by default.
+    #[doc(hidden)]
+    fn before_comparison(&self, _representative: &Path) {}
+
     /// Full-content digest used to split a sampled-digest bucket with more than two
     /// members before byte comparison, so files that differ only in unsampled bytes cost
     /// one extra read each instead of one comparison per equality class.

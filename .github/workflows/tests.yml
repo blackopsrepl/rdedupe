@@ -41,6 +41,9 @@ jobs:
           sudo mount -o loop "$RUNNER_TEMP/btrfs.img" /mnt/btrfs
           sudo chown "$(id -u):$(id -g)" /mnt/btrfs
       - name: Extent acceptance (must not skip)
+        # `shell: bash` runs with `-o pipefail`, so a failing test fails the step even
+        # though its output goes through `tee`.
+        shell: bash
         run: |
           TMPDIR=/mnt/btrfs make filesystem-acceptance 2>&1 | tee extent.log
           if grep -q SKIP extent.log; then echo "extent tests skipped on Btrfs"; exit 1; fi

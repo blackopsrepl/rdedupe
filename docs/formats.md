@@ -19,7 +19,12 @@ whose encoding differs reject the path. Display strings (human output, CSV
 `path_display`) keep valid UTF-8 readable and escape the rest: `\\` for a backslash;
 `\n`, `\r`, `\t`; `\xNN` for other ASCII controls and for bytes that are not valid
 UTF-8; `\u{XXXX}` for C1 controls and invisible or bidirectional formatting characters
-(such as U+202E, which could disguise a name). They are never parsed back.
+(such as U+202E, which could disguise a name). They are never parsed back. Every human
+line (reports, unresolved messages, apply/restore/purge/recover outcomes and the
+`error:` line on stderr) is escaped the same way, except that backslashes in free text
+are left as they are, so an OS error message that embeds a raw path cannot inject
+terminal control sequences or start a forged line. Machine formats carry messages
+unescaped as JSON strings.
 
 ## Scan output: `rdedupe-machine-v1`
 

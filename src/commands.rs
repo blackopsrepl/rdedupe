@@ -169,7 +169,8 @@ fn emit<T: Serialize>(
             serde_json::to_writer(&mut out, &Tagged { record, value })?;
             out.write_all(b"\n")?;
         }
-        ResultFormat::Human => writeln!(out, "{}", human())?,
+        // Human lines embed paths and OS messages: one escaped line each.
+        ResultFormat::Human => writeln!(out, "{}", crate::paths::display_text(&human()))?,
     }
     Ok(())
 }

@@ -5,7 +5,7 @@ use rdedupe::fingerprint::{CollisionFingerprinter, Fingerprinter, SampleFingerpr
 use rdedupe::model::Observation;
 use rdedupe::scheduler::Cancellation;
 use rdedupe::{Budget, Completeness, Exactness, Policy};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use support::*;
 
 #[test]
@@ -288,7 +288,142 @@ fn a_file_changed_after_inventory_is_unresolved_never_unique() {
     );
     assert_eq!(result.summary.completeness, Completeness::Partial);
     assert_eq!(result.summary.exactness, Exactness::Exact);
-    assert!(result.summary.unresolved >= 1);
+    assert_eq!(unresolved_names(&result), ["b"]);
+    assert!(store_groups(&result).is_empty());
+}
+
+fn unresolved_names(result: &rdedupe::ScanResult) -> Vec<String> {
+    let mut names = Vec::new();
+    result
+        .store
+        .for_each_unresolved(|u| {
+            let path = u.path.to_path().unwrap();
+            names.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            Ok(())
+        })
+        .unwrap();
+    names.sort();
+    names
+}
+
+/// Rewrites `name` with its own bytes (same content, new timestamps) right before its
+/// `nth` comparison as a representative, or right after `after` is fingerprinted.
+struct ChangeRepresentative {
+    name: &'static str,
+    nth: usize,
+    after: Option<&'static str>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ChangeRepresentative {
+    fn rewrite(path: &Path) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let data = std::fs::read(path).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+}
+
+impl Fingerprinter for ChangeRepresentative {
+    fn fingerprint(
+        &self,
+        path: &Path,
+        expected: &Observation,
+        buffer: &mut [u8],
+        cancel: &Cancellation,
+    ) -> rdedupe::Result<([u8; 32], u64)> {
+        let result = SampleFingerprinter.fingerprint(path, expected, buffer, cancel);
+        if self
+            .after
+            .is_some_and(|a| path.file_name().is_some_and(|n| n == a))
+        {
+            Self::rewrite(&path.with_file_name(self.name));
+        }
+        result
+    }
+
+    fn before_comparison(&self, representative: &Path) {
+        if self.after.is_none() && representative.file_name().is_some_and(|n| n == self.name) {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if call == self.nth {
+                Self::rewrite(representative);
+            }
+        }
+    }
+}
+
+fn scan_changing(
+    fixture: &Fixture,
+    budget: Budget,
+    change: ChangeRepresentative,
+) -> rdedupe::ScanResult {
+    library_scan_with(&[fixture.root()], Policy::default(), budget, &change)
+}
+
+/// A representative that changes is itself unresolved; the copies compared with it are
+/// not blamed, and still form their group.
+#[test]
+fn a_representative_changed_after_inventory_is_the_unresolved_one() {
+    let fixture = Fixture::new();
+    for name in ["a", "b", "c"] {
+        fixture.write(name, b"same content");
+    }
+    let result = scan_changing(
+        &fixture,
+        Budget {
+            readers: 1,
+            ..Budget::default()
+        },
+        ChangeRepresentative {
+            name: "a",
+            nth: 0,
+            after: Some("c"),
+            calls: Default::default(),
+        },
+    );
+    assert_eq!(result.summary.completeness, Completeness::Partial);
+    assert_eq!(unresolved_names(&result), ["a"]);
+    assert_eq!(
+        store_groups(&result),
+        Groups::from([group([&fixture.path("b"), &fixture.path("c")])])
+    );
+}
+
+/// The representative of an existing class changes between two batches: the next member
+/// (already proven equal) takes over, in memory and in the disk-backed path.
+#[test]
+fn a_class_whose_representative_changes_mid_bucket_keeps_its_other_members() {
+    for (files, nth) in [(4usize, 2usize), (20, 1), (20, 2), (20, 5)] {
+        let fixture = Fixture::new();
+        let names: Vec<String> = (0..files).map(|i| format!("f{i:02}")).collect();
+        for name in &names {
+            fixture.write(name, b"same content");
+        }
+        let result = scan_changing(
+            &fixture,
+            Budget {
+                readers: 1,
+                queue_rows: 16,
+                ..Budget::default()
+            },
+            ChangeRepresentative {
+                name: "f00",
+                nth,
+                after: None,
+                calls: Default::default(),
+            },
+        );
+        assert_eq!(
+            unresolved_names(&result),
+            ["f00"],
+            "files={files} nth={nth}"
+        );
+        let rest: Vec<PathBuf> = names[1..].iter().map(|n| fixture.path(n)).collect();
+        assert_eq!(
+            store_groups(&result),
+            Groups::from([group(rest.iter())]),
+            "files={files} nth={nth}"
+        );
+    }
 }
 
 #[test]

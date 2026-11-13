@@ -1,3 +1,8 @@
+# Recipes run under bash with pipefail: a failing command piped into grep or tee fails
+# its target.
+SHELL := bash
+.SHELLFLAGS := -o pipefail -c
+
 BINARY := rdedupe
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
