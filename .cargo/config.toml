@@ -1,0 +1,4 @@
+# Tests seal plans and journals with a key from RDEDUPE_STATE_DIR; keep that key inside
+# the build tree instead of the developer's ~/.local/state.
+[env]
+RDEDUPE_STATE_DIR = { value = "target/test-state", relative = true }

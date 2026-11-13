@@ -1,122 +1,66 @@
-//! File information collection and parallel processing.
+//! Metadata observation and change-detecting file opens.
 
-use indicatif::{ParallelProgressIterator, ProgressStyle};
-use log::info;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use std::error::Error;
-use std::fs;
+use crate::error::{io, Error, Result};
+use crate::model::Observation;
+use crate::platform;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 
-#[derive(Debug, Clone)]
-pub struct FileInfo {
-    pub path: String,
-    pub name: String,
-    pub extension: String,
-    pub size_bytes: u64,
-    pub size_mb: f64,
-    pub md5_hash: String,
-    pub created: Option<String>,
-    pub modified: Option<String>,
+pub fn observe_path(path: &Path) -> Result<Observation> {
+    platform::observe_path(path)
 }
 
-impl FileInfo {
-    pub fn new(path: &str) -> Result<Self, Box<dyn Error>> {
-        let path_obj = Path::new(path);
-        let metadata = fs::metadata(path)?;
-
-        let name = path_obj
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        let extension = path_obj
-            .extension()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        let size_bytes = metadata.len();
-        let size_mb = size_bytes as f64 / 1_048_576.0;
-
-        let file_content = fs::read(path)?;
-        let md5_hash = format!("{:x}", md5::compute(&file_content));
-
-        let created = metadata
-            .created()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| format!("{}", duration.as_secs()));
-
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| format!("{}", duration.as_secs()));
-
-        Ok(FileInfo {
-            path: path.to_string(),
-            name,
-            extension,
-            size_bytes,
-            size_mb,
-            md5_hash,
-            created,
-            modified,
-        })
-    }
+/// Opens a regular file for reading without following a final symlink and without
+/// blocking on FIFOs, returning the descriptor and its `fstat` observation.
+pub fn open_observed(path: &Path) -> Result<(File, Observation)> {
+    open_regular(path, false)
 }
 
-pub fn collect_file_info(files: Vec<String>) -> Result<Vec<FileInfo>, Box<dyn Error>> {
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    info!(
-        "\nAnalyzing {} files with {} threads...",
-        files.len(),
-        rayon::current_num_threads()
-    );
-
-    let pb = indicatif::ProgressBar::new(files.len() as u64);
-    let sty = ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
-        .expect("Invalid progress bar template")
-        .progress_chars("##-");
-
-    pb.set_style(sty);
-    pb.set_message("Computing MD5 hashes...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    let file_infos: Vec<Option<FileInfo>> = files
-        .par_iter()
-        .progress_with(pb.clone())
-        .map(|file_path| FileInfo::new(file_path).ok())
-        .collect();
-
-    pb.finish_with_message("✓ File analysis complete!");
-    info!("");
-
-    let valid_infos: Vec<FileInfo> = file_infos.into_iter().flatten().collect();
-
-    Ok(valid_infos)
+/// Like [`open_observed`] but with write access (required by extent sharing).
+pub fn open_observed_rw(path: &Path) -> Result<(File, Observation)> {
+    open_regular(path, true)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_file_info_creates_correctly() {
-        let temp_dir = TempDir::new().unwrap();
-        let file_path = temp_dir.path().join("test.txt");
-        fs::write(&file_path, "test content").unwrap();
-
-        let info = FileInfo::new(file_path.to_str().unwrap()).unwrap();
-        assert_eq!(info.name, "test.txt");
-        assert_eq!(info.extension, "txt");
-        assert_eq!(info.size_bytes, 12);
-        assert!(!info.md5_hash.is_empty());
+fn open_regular(path: &Path, write: bool) -> Result<(File, Observation)> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(write);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    let file = options.open(path).map_err(|e| io("open", path, e))?;
+    let metadata = file.metadata().map_err(|e| io("fstat", path, e))?;
+    if !metadata.is_file() {
+        return Err(Error::Unstable(format!(
+            "{path:?} is no longer a regular file"
+        )));
+    }
+    Ok((file, platform::observation(&metadata)))
+}
+
+/// Opens `path` and requires the object to be the one inventoried: same identity, size,
+/// modification and change time. Anything else changed after discovery and must become
+/// unresolved instead of being treated as unique or compared on stale assumptions.
+pub fn open_expected(path: &Path, expected: &Observation) -> Result<(File, Observation)> {
+    let (file, now) = open_observed(path)?;
+    if now.identity != expected.identity
+        || now.size != expected.size
+        || now.modified_ns != expected.modified_ns
+        || now.changed_ns != expected.changed_ns
+    {
+        return Err(Error::Unstable(format!(
+            "{} changed after it was inventoried",
+            crate::paths::display_path(path)
+        )));
+    }
+    Ok((file, now))
+}
+
+pub fn ensure_stable(path: &Path, before: &Observation, file: &File) -> Result<()> {
+    let after = platform::observe_file(file).map_err(|e| io("fstat", path, e))?;
+    if &after != before {
+        return Err(Error::Unstable(format!("{path:?}")));
+    }
+    Ok(())
 }
