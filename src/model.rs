@@ -27,6 +27,10 @@ pub struct Observation {
     pub uid: u32,
     #[serde(default)]
     pub gid: u32,
+    /// Creation (birth) time where the filesystem records it. A file that merely reuses a
+    /// freed inode number has a different one.
+    #[serde(default)]
+    pub created_ns: Option<i128>,
 }
 
 #[derive(Debug, Clone)]

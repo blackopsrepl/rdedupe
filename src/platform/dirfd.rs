@@ -52,6 +52,7 @@ fn observation(stat: &libc::stat) -> Observation {
         links: stat.st_nlink as u64,
         uid: stat.st_uid,
         gid: stat.st_gid,
+        created_ns: None,
     }
 }
 

@@ -103,6 +103,7 @@ pub fn load(path: &Path, store: &Store, cancel: &crate::scheduler::Cancellation)
                     links: 0,
                     uid: 0,
                     gid: 0,
+                    created_ns: None,
                 },
                 digest,
             },

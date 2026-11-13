@@ -22,10 +22,10 @@ pub const PAGE: u64 = 256;
 const BATCH: u64 = 4096;
 
 const RECORD_COLUMNS: &str =
-    "files.id,files.path,files.device,files.inode,files.size,files.allocated,files.modified_ns,files.changed_ns,files.mode,files.links,files.alias_of,files.uid,files.gid";
+    "files.id,files.path,files.device,files.inode,files.size,files.allocated,files.modified_ns,files.changed_ns,files.mode,files.links,files.alias_of,files.uid,files.gid,files.created_ns";
 
 /// Number of columns in [`RECORD_COLUMNS`]; extra selected columns start at this index.
-const RECORD_COLUMN_COUNT: usize = 13;
+const RECORD_COLUMN_COUNT: usize = 14;
 
 pub struct Store {
     conn: Connection,
@@ -55,6 +55,9 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
             links: row.get::<_, i64>(9)? as u64,
             uid: row.get::<_, i64>(11)? as u32,
             gid: row.get::<_, i64>(12)? as u32,
+            created_ns: row
+                .get::<_, Option<String>>(13)?
+                .and_then(|v| v.parse().ok()),
         },
         alias_of: row.get(10)?,
     })
@@ -119,7 +122,7 @@ impl Store {
             .conn
             .pragma_update(None, "max_page_count", max_pages as i64)?;
         store.conn.execute_batch(
-            "CREATE TABLE files (id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE, device INTEGER NOT NULL, inode INTEGER NOT NULL, size INTEGER NOT NULL, allocated INTEGER NOT NULL, modified_ns TEXT NOT NULL, changed_ns TEXT NOT NULL, mode INTEGER NOT NULL, links INTEGER NOT NULL, alias_of INTEGER, uid INTEGER NOT NULL, gid INTEGER NOT NULL);
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path BLOB NOT NULL UNIQUE, device INTEGER NOT NULL, inode INTEGER NOT NULL, size INTEGER NOT NULL, allocated INTEGER NOT NULL, modified_ns TEXT NOT NULL, changed_ns TEXT NOT NULL, mode INTEGER NOT NULL, links INTEGER NOT NULL, alias_of INTEGER, uid INTEGER NOT NULL, gid INTEGER NOT NULL, created_ns TEXT);
              CREATE INDEX files_identity ON files(device, inode, path);
              CREATE INDEX files_candidates ON files(size, alias_of, path);
              CREATE TABLE unresolved (id INTEGER PRIMARY KEY, path BLOB NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL, retry_safe INTEGER NOT NULL);
@@ -202,7 +205,7 @@ impl Store {
 
     pub fn insert_file(&self, path: &Path, obs: &Observation) -> Result<()> {
         self.exec(
-            "INSERT OR IGNORE INTO files(path,device,inode,size,allocated,modified_ns,changed_ns,mode,links,uid,gid) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT OR IGNORE INTO files(path,device,inode,size,allocated,modified_ns,changed_ns,mode,links,uid,gid,created_ns) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 path_bytes(path),
                 obs.identity.device as i64,
@@ -214,7 +217,8 @@ impl Store {
                 obs.mode as i64,
                 obs.links as i64,
                 obs.uid as i64,
-                obs.gid as i64
+                obs.gid as i64,
+                obs.created_ns.map(|v| v.to_string())
             ],
         )?;
         self.wrote()

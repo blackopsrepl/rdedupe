@@ -339,6 +339,12 @@ fn extent_one(
     {
         return refused("keeper or target was replaced after validation".into());
     }
+    if source_observation.identity.device != destination_observation.identity.device {
+        return refused(
+            "keeper and target are on different filesystems; extents can only be shared within one"
+                .into(),
+        );
+    }
     let base = entry(number, action, ActionKind::Extent, State::Prepared);
     journal.append(base.clone(), hooks)?;
     let size = action.target_observation.size;

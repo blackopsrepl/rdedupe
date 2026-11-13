@@ -276,18 +276,80 @@ fn crash_child_process() {
     }
     let plan = PathBuf::from(std::env::var("RDEDUPE_TEST_PLAN").unwrap());
     let journal = PathBuf::from(std::env::var("RDEDUPE_TEST_JOURNAL").unwrap());
-    let _ = rdedupe::delete::execute_with_hooks(
-        &plan,
-        &journal,
-        65_536,
-        &Cancellation::default(),
-        &Abort(Cell::new(at.parse().unwrap())),
-        |_| Ok(()),
-    );
+    let hooks = Abort(Cell::new(at.parse().unwrap()));
+    if let Ok(limit) = std::env::var("RDEDUPE_TEST_FILE_SIZE_LIMIT") {
+        // A file-size limit makes the journal write fail part-way, exactly like a full
+        // disk: the write returns an error (EFBIG instead of ENOSPC) after a prefix of the
+        // record may have reached the file.
+        let limit: libc::rlim_t = limit.parse().unwrap();
+        unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let rl = libc::rlimit {
+                rlim_cur: limit,
+                rlim_max: limit,
+            };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &rl), 0);
+        }
+        let result = rdedupe::delete::execute(
+            &plan,
+            &journal,
+            65_536,
+            &Cancellation::default(),
+            |_| Ok(()),
+        );
+        let code = match result {
+            Err(error) if !error.retry_safe() => 3,
+            Err(error) => {
+                eprintln!("retry-safe failure: {error}");
+                4
+            }
+            Ok(_) => 0,
+        };
+        std::process::exit(code);
+    }
+    let _ = match std::env::var("RDEDUPE_TEST_OPERATION").as_deref() {
+        Ok("restore") => {
+            rdedupe::recovery::restore_with_hooks(&journal, &hooks, |_| {}).map(|_| ())
+        }
+        Ok("purge") => rdedupe::recovery::purge_with_hooks(
+            &journal,
+            65_536,
+            &Cancellation::default(),
+            &hooks,
+            |_| {},
+        )
+        .map(|_| ()),
+        Ok("resume") => {
+            let mut options = rdedupe::delete::ApplyOptions::new(65_536);
+            options.resume = true;
+            rdedupe::delete::execute_in(
+                &plan,
+                &journal,
+                &options,
+                &Cancellation::default(),
+                &hooks,
+                |_| Ok(()),
+            )
+            .map(|_| ())
+        }
+        _ => rdedupe::delete::execute_with_hooks(
+            &plan,
+            &journal,
+            65_536,
+            &Cancellation::default(),
+            &hooks,
+            |_| Ok(()),
+        )
+        .map(|_| ()),
+    };
     std::process::exit(0);
 }
 
 fn crash_at(case: &Case, record: u32) {
+    crash_during(case, "apply", record);
+}
+
+fn crash_during(case: &Case, operation: &str, record: u32) {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "crash_child_process",
@@ -296,6 +358,7 @@ fn crash_at(case: &Case, record: u32) {
             "--test-threads=1",
         ])
         .env("RDEDUPE_TEST_CRASH_AT", record.to_string())
+        .env("RDEDUPE_TEST_OPERATION", operation)
         .env("RDEDUPE_TEST_PLAN", case.plan())
         .env("RDEDUPE_TEST_JOURNAL", case.journal())
         .stdout(std::process::Stdio::null())
@@ -594,4 +657,156 @@ fn a_user_directory_named_like_the_quarantine_is_never_taken_over() {
     let rescan = library_scan(&[fixture.root()], Policy::default());
     assert_eq!(rescan.summary.metrics.objects, 3);
     assert_eq!(rescan.summary.metrics.owned_dirs_skipped, 0);
+}
+
+#[test]
+fn crash_during_restore_or_purge_is_finished_by_running_it_again() {
+    for record in 1..=2u32 {
+        let case = Case::new();
+        apply(&case.plan(), &case.journal());
+        crash_during(&case, "restore", record);
+        let again = case.restore();
+        assert!(
+            again.clean(),
+            "restore after a crash at record {record}: {again:?}"
+        );
+        case.assert_all_restored();
+
+        let case = Case::new();
+        apply(&case.plan(), &case.journal());
+        crash_during(&case, "purge", record);
+        let again = case.purge();
+        assert_eq!(again.conflicts, 0, "purge after a crash at record {record}");
+        assert_eq!(case.present(), vec!["a"]);
+        assert_eq!(case.fixture.read("a"), CONTENT);
+        assert!(case.quarantine_paths().iter().all(|q| !q.exists()));
+    }
+}
+
+#[test]
+fn resume_after_a_crash_at_every_durable_boundary_finishes_the_plan() {
+    for record in 1..=6u32 {
+        let case = Case::new();
+        crash_at(&case, record);
+        let mut options = rdedupe::delete::ApplyOptions::new(65_536);
+        options.resume = true;
+        let summary = rdedupe::delete::execute_in(
+            &case.plan(),
+            &case.journal(),
+            &options,
+            &Cancellation::default(),
+            &rdedupe::journal::NoHooks,
+            |_| Ok(()),
+        )
+        .unwrap_or_else(|e| panic!("resume after record {record}: {e}"));
+        assert_eq!(summary.quarantined, 2, "record {record}: {summary:?}");
+        assert_eq!(case.present(), vec!["a"], "record {record}");
+        for q in case.quarantine_paths() {
+            assert_eq!(std::fs::read(q).unwrap(), CONTENT);
+        }
+        // Resume is idempotent, and everything stays restorable.
+        let again = rdedupe::delete::execute_in(
+            &case.plan(),
+            &case.journal(),
+            &options,
+            &Cancellation::default(),
+            &rdedupe::journal::NoHooks,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(again.quarantined, 2);
+        assert!(case.restore().clean());
+        case.assert_all_restored();
+    }
+}
+
+#[test]
+fn a_crashed_resume_can_itself_be_resumed() {
+    let case = Case::new();
+    crash_at(&case, 2);
+    crash_during(&case, "resume", 2);
+    let mut options = rdedupe::delete::ApplyOptions::new(65_536);
+    options.resume = true;
+    let summary = rdedupe::delete::execute_in(
+        &case.plan(),
+        &case.journal(),
+        &options,
+        &Cancellation::default(),
+        &rdedupe::journal::NoHooks,
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(summary.quarantined, 2);
+    assert_eq!(case.present(), vec!["a"]);
+}
+
+#[test]
+fn resume_refuses_a_journal_from_another_plan() {
+    let case = Case::new();
+    apply(&case.plan(), &case.journal());
+    assert!(case.restore().clean());
+    // A different plan over a different tree, resumed with the first plan's journal.
+    let other = Case::new();
+    let mut options = rdedupe::delete::ApplyOptions::new(65_536);
+    options.resume = true;
+    let error = rdedupe::delete::execute_in(
+        &other.plan(),
+        &case.journal(),
+        &options,
+        &Cancellation::default(),
+        &rdedupe::journal::NoHooks,
+        |_| Ok(()),
+    )
+    .expect_err("foreign journal");
+    assert!(
+        error.to_string().contains("does not belong to this plan"),
+        "{error}"
+    );
+    assert_eq!(other.present(), vec!["a", "b", "c"]);
+}
+
+#[test]
+fn a_failing_journal_write_stops_before_the_next_mutation_and_restores_cleanly() {
+    // Sixty identical files: 59 actions, about 180 journal records (over 100 KiB). A 48 KiB
+    // file-size limit makes a journal write fail part-way through the run.
+    let fixture = Fixture::new();
+    for i in 0..60 {
+        fixture.write(format!("f{i:02}"), CONTENT);
+    }
+    let work = Fixture::new();
+    let result = library_scan(&[fixture.root()], Policy::default());
+    rdedupe::plan::write_plan(&result, &work.path("plan"), ActionKind::Quarantine).unwrap();
+    let index = Fixture::new();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "crash_child_process",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("RDEDUPE_TEST_CRASH_AT", "1000000")
+        .env("RDEDUPE_TEST_FILE_SIZE_LIMIT", (48 * 1024).to_string())
+        .env("RDEDUPE_TEST_PLAN", work.path("plan"))
+        .env("RDEDUPE_TEST_JOURNAL", work.path("journal"))
+        .env("TMPDIR", index.root())
+        .output()
+        .unwrap();
+    let status = status.status;
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "the run must stop with a not-retry-safe error"
+    );
+    let journal_len = std::fs::metadata(work.path("journal")).unwrap().len();
+    assert!(journal_len <= 48 * 1024);
+    // Some files moved, the rest never did; restore returns every one.
+    let summary = rdedupe::recovery::restore(&work.path("journal"), |_| {}).unwrap();
+    assert_eq!(summary.conflicts + summary.missing, 0, "{summary:?}");
+    assert!(
+        summary.restored > 0,
+        "the run stopped part-way: {summary:?}"
+    );
+    for i in 0..60 {
+        assert_eq!(fixture.read(format!("f{i:02}")), CONTENT, "f{i:02}");
+    }
 }

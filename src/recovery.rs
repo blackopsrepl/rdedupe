@@ -6,7 +6,7 @@
 
 use crate::compare;
 use crate::error::{io, Error, Result};
-use crate::journal::{for_each_limited, Journal, JournalEntry, NoHooks, State};
+use crate::journal::{for_each_limited, Journal, JournalEntry, JournalHooks, NoHooks, State};
 use crate::model::{ActionKind, FileIdentity};
 use crate::paths::EncodedPath;
 use crate::quarantine;
@@ -35,12 +35,14 @@ pub enum Location {
     Absent,
 }
 
-/// What identifies the journaled object at a path. A rename keeps identity, size and
-/// modification time, while a different object that happens to reuse the inode number
-/// (common on ext4 right after a delete) almost never matches all three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What identifies the journaled object at a path. A rename keeps the identity and the
+/// creation time; a different file that merely reuses a freed inode number (common on ext4
+/// right after a delete) has a new creation time. Where the filesystem records none, size
+/// and modification time stand in, which also refuses objects modified in place.
+#[derive(Debug, Clone, Copy)]
 struct Seen {
     identity: FileIdentity,
+    created_ns: Option<i128>,
     size: u64,
     modified_ns: i128,
 }
@@ -49,9 +51,20 @@ impl Seen {
     fn of(observation: &crate::model::Observation) -> Self {
         Self {
             identity: observation.identity,
+            created_ns: observation.created_ns,
             size: observation.size,
             modified_ns: observation.modified_ns,
         }
+    }
+}
+
+impl PartialEq for Seen {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && match (self.created_ns, other.created_ns) {
+                (Some(a), Some(b)) => a == b,
+                _ => self.size == other.size && self.modified_ns == other.modified_ns,
+            }
     }
 }
 
@@ -160,16 +173,31 @@ fn each_action(
     Ok(tail.truncated_tail || journal.dropped_torn_tail())
 }
 
-fn record(journal: &mut Journal, entry: &JournalEntry, state: State, message: &str) -> Result<()> {
+fn record(
+    journal: &mut Journal,
+    hooks: &dyn JournalHooks,
+    entry: &JournalEntry,
+    state: State,
+    message: &str,
+) -> Result<()> {
     let mut next = entry.clone();
     next.state = state;
     next.message = Some(message.into());
-    journal.append(next, &NoHooks)
+    journal.append(next, hooks)
 }
 
 /// Moves every quarantined object back to its original path, never replacing an entry that
 /// now exists there. Idempotent.
-pub fn restore(journal_path: &Path, mut report: impl FnMut(&Finding)) -> Result<RecoverySummary> {
+pub fn restore(journal_path: &Path, report: impl FnMut(&Finding)) -> Result<RecoverySummary> {
+    restore_with_hooks(journal_path, &NoHooks, report)
+}
+
+/// [`restore`] with a fault-injection seam called after every durable record.
+pub fn restore_with_hooks(
+    journal_path: &Path,
+    hooks: &dyn JournalHooks,
+    mut report: impl FnMut(&Finding),
+) -> Result<RecoverySummary> {
     let mut journal = Journal::open_existing(journal_path)?;
     let mut summary = RecoverySummary::default();
     let truncated = each_action(&mut journal, |journal, entry| {
@@ -185,6 +213,7 @@ pub fn restore(journal_path: &Path, mut report: impl FnMut(&Finding)) -> Result<
                 quarantine::restore(&source, &entry.target.to_path()?)?;
                 record(
                     journal,
+                    hooks,
                     entry,
                     State::Restored,
                     "moved back from quarantine",
@@ -212,6 +241,7 @@ pub fn restore(journal_path: &Path, mut report: impl FnMut(&Finding)) -> Result<
                 }
                 record(
                     journal,
+                    hooks,
                     entry,
                     State::Restored,
                     "removed the extra quarantine name",
@@ -248,6 +278,17 @@ pub fn purge(
     journal_path: &Path,
     buffer_bytes: usize,
     cancel: &Cancellation,
+    report: impl FnMut(&Finding),
+) -> Result<RecoverySummary> {
+    purge_with_hooks(journal_path, buffer_bytes, cancel, &NoHooks, report)
+}
+
+/// [`purge`] with a fault-injection seam called after every durable record.
+pub fn purge_with_hooks(
+    journal_path: &Path,
+    buffer_bytes: usize,
+    cancel: &Cancellation,
+    hooks: &dyn JournalHooks,
     mut report: impl FnMut(&Finding),
 ) -> Result<RecoverySummary> {
     let mut journal = Journal::open_existing(journal_path)?;
@@ -276,6 +317,7 @@ pub fn purge(
                 if keeper_ok && quarantine::remove_name(&object, &entry.target_observation)? {
                     record(
                         journal,
+                        hooks,
                         entry,
                         State::Purged,
                         "removed after keeper verification",
@@ -331,7 +373,7 @@ fn assess(entry: &JournalEntry, location: Option<Location>) -> &'static str {
     match (entry.kind, entry.state, location) {
         (ActionKind::Extent, State::Committed, _) => "extent sharing completed",
         (ActionKind::Extent, _, _) => {
-            "extent sharing incomplete; files are independent and unchanged in content, re-plan to continue"
+            "extent sharing incomplete; files are independent and unchanged in content; `apply --resume` continues"
         }
         (_, State::Prepared | State::Failed, Some(Location::InPlace)) => {
             "not moved; nothing to recover"

@@ -266,8 +266,10 @@ impl Index {
         let directory = crate::platform::create_scratch_dir(&base, "rdedupe-plan-index")?;
         let directory = tempfile_dir::Dir(directory);
         let connection = rusqlite::Connection::open(directory.0.join("index.sqlite3"))?;
+        // Disposable, single-connection index: no sync, no journal, no shared memory.
         connection.pragma_update(None, "synchronous", "OFF")?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        connection.pragma_update(None, "journal_mode", "OFF")?;
         connection.pragma_update(None, "cache_size", -4096)?;
         connection.pragma_update(None, "temp_store", "FILE")?;
         let page_size: i64 = connection.pragma_query_value(None, "page_size", |r| r.get(0))?;

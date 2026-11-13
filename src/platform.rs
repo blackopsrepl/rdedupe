@@ -29,6 +29,11 @@ pub fn observation(metadata: &Metadata) -> Observation {
             links: metadata.nlink(),
             uid: metadata.uid(),
             gid: metadata.gid(),
+            created_ns: metadata
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos() as i128),
         }
     }
     #[cfg(not(unix))]
@@ -52,6 +57,7 @@ pub fn observation(metadata: &Metadata) -> Observation {
             links: 1,
             uid: 0,
             gid: 0,
+            created_ns: None,
         }
     }
 }
