@@ -60,11 +60,30 @@ impl EncodedPath {
 /// become `\xNN`; control characters and invisible or bidirectional formatting characters
 /// (which can disguise a name, e.g. U+202E) are escaped. Never parsed back.
 pub fn display_path(path: &Path) -> String {
+    escape_for_terminal(path_bytes(path), true)
+}
+
+/// Terminal-safe rendering of free text that may embed raw paths or OS messages (error
+/// messages, reasons): the same escaping as [`display_path`] except that backslashes stay
+/// as they are, so already-escaped paths inside the text are not escaped twice. The result
+/// is always one line.
+pub fn display_text(text: &str) -> String {
+    escape_for_terminal(text.as_bytes(), false)
+}
+
+fn escape_for_terminal(bytes: &[u8], escape_backslash: bool) -> String {
+    // Most names and messages are printable ASCII with nothing to escape.
+    if bytes
+        .iter()
+        .all(|&b| (0x20..0x7f).contains(&b) && !(escape_backslash && b == b'\\'))
+    {
+        return String::from_utf8(bytes.to_vec()).expect("printable ASCII");
+    }
     let mut out = String::new();
-    for chunk in path_bytes(path).utf8_chunks() {
+    for chunk in bytes.utf8_chunks() {
         for ch in chunk.valid().chars() {
             match ch {
-                '\\' => out.push_str("\\\\"),
+                '\\' if escape_backslash => out.push_str("\\\\"),
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),

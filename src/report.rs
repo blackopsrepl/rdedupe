@@ -3,7 +3,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::{FileRecord, GroupMember};
-use crate::paths::{display_path, path_bytes, EncodedPath};
+use crate::paths::{display_path, display_text, path_bytes, EncodedPath};
 use crate::pipeline::{ScanResult, MACHINE_SCHEMA};
 use serde::Serialize;
 use std::io::Write;
@@ -120,7 +120,7 @@ fn write_human(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
             out,
             "  {tag} {} ({})",
             display_path(&m.record.path),
-            m.reason
+            display_text(&m.reason)
         )?;
         Ok(())
     })?;
@@ -151,7 +151,7 @@ fn write_human(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
                 "  UNRESOLVED {} [{}]: {}",
                 display_path(&item.path.to_path()?),
                 item.operation,
-                item.message
+                display_text(&item.message)
             )?;
             Ok(())
         })?;

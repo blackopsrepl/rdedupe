@@ -80,7 +80,10 @@ discover → size classes → fingerprints → exact comparison → groups → a
   comparison per class (`tests/exactness.rs` checks both). Every open
   for fingerprinting, refinement and comparison checks the object against its inventory
   observation (identity, size, mtime, ctime); an object that changed after discovery is
-  unresolved and makes the scan partial, never "unique".
+  unresolved and makes the scan partial, never "unique". A failure is charged to the file
+  that failed: when a comparison's representative changes or cannot be read, the
+  representative is unresolved, the files it was being compared with stay pending, and
+  its class continues with the next member already proven equal to it.
   Reads retry short and interrupted reads; a short read is never taken for a difference.
 - **Accounting** (`src/accounting.rs`) counts paths, objects, aliases, groups,
   participants, eligible copies, logical redundant bytes and allocated bytes of

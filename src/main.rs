@@ -30,7 +30,10 @@ fn main() {
         Err(rdedupe::Error::Cancelled) => EXIT_CANCELLED,
         Err(error) if error.is_broken_pipe() => EXIT_BROKEN_PIPE,
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!(
+                "error: {}",
+                rdedupe::paths::display_text(&error.to_string())
+            );
             let category = serde_json::to_value(error.category())
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_owned))

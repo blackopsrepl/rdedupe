@@ -229,12 +229,17 @@ fn classify_bucket(
             let mut pending: Vec<&FileRecord> = batch.iter().collect();
             join_existing_classes(store, options, metrics, &mut pending)?;
             while let Some((&first, rest)) = pending.split_first() {
-                let class_id = store.add_comparison_class(first)?;
-                classes += 1;
-                if limited && classes > CLASS_LIMIT {
+                if limited && classes + 1 > CLASS_LIMIT {
                     return Ok(Bucket::TooManyClasses);
                 }
-                let (equal, different) = compare_batch(store, options, metrics, first, rest)?;
+                let Some((equal, different)) = compare_batch(store, options, metrics, first, rest)?
+                else {
+                    // `first` itself failed and is unresolved; the rest are still pending.
+                    pending = rest.to_vec();
+                    continue;
+                };
+                let class_id = store.add_comparison_class(first)?;
+                classes += 1;
                 for record in equal {
                     store.add_comparison_member(class_id, record)?;
                 }
@@ -258,18 +263,31 @@ fn classify_in_memory(
     for batch in members.chunks(batch_size(options)) {
         let mut pending: Vec<&FileRecord> = batch.iter().collect();
         for class in classes.iter_mut() {
-            if pending.is_empty() {
-                break;
+            while !pending.is_empty() && !class.is_empty() {
+                match compare_batch(store, options, metrics, class[0], &pending)? {
+                    Some((equal, different)) => {
+                        class.extend(equal);
+                        pending = different;
+                        break;
+                    }
+                    // The representative failed and is unresolved: the next member, already
+                    // proven equal to it, represents the class.
+                    None => {
+                        class.remove(0);
+                    }
+                }
             }
-            let (equal, different) = compare_batch(store, options, metrics, class[0], &pending)?;
-            class.extend(equal);
-            pending = different;
         }
+        classes.retain(|class| !class.is_empty());
         while let Some((&first, rest)) = pending.split_first() {
             if limited && classes.len() as u64 >= CLASS_LIMIT {
                 return Ok(Bucket::TooManyClasses);
             }
-            let (equal, different) = compare_batch(store, options, metrics, first, rest)?;
+            let Some((equal, different)) = compare_batch(store, options, metrics, first, rest)?
+            else {
+                pending = rest.to_vec();
+                continue;
+            };
             let mut class = vec![first];
             class.extend(equal);
             classes.push(class);
@@ -301,15 +319,23 @@ fn join_existing_classes(
             return Ok(());
         };
         for (class_id, representative) in representatives {
-            if pending.is_empty() {
-                return Ok(());
+            let mut representative = Some(representative);
+            while let Some(current) = representative.take() {
+                if pending.is_empty() {
+                    return Ok(());
+                }
+                match compare_batch(store, options, metrics, &current, pending)? {
+                    Some((equal, different)) => {
+                        for record in equal {
+                            store.add_comparison_member(class_id, record)?;
+                        }
+                        *pending = different;
+                    }
+                    // The representative failed and is unresolved: promote another member
+                    // (or drop the class when it has none) and compare with that.
+                    None => representative = store.replace_representative(class_id)?,
+                }
             }
-            let (equal, different) =
-                compare_batch(store, options, metrics, &representative, pending)?;
-            for record in equal {
-                store.add_comparison_member(class_id, record)?;
-            }
-            *pending = different;
         }
         last_class = tail;
     }
@@ -318,18 +344,23 @@ fn join_existing_classes(
 
 /// Compares `pending` with one representative in a single pass and returns the members
 /// that are byte-identical to it and those that differ. Members that cannot be compared
-/// become unresolved and are in neither list.
+/// become unresolved and are in neither list. When the representative itself cannot be
+/// read or changed, it becomes unresolved and `None` is returned: every member is still
+/// pending, because nothing was learned about them.
 fn compare_batch<'a>(
     store: &Store,
     options: &Options<'_>,
     metrics: &mut Metrics,
     representative: &FileRecord,
     pending: &[&'a FileRecord],
-) -> Result<(Vec<&'a FileRecord>, Vec<&'a FileRecord>)> {
+) -> Result<Option<(Vec<&'a FileRecord>, Vec<&'a FileRecord>)>> {
     if pending.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(Some((Vec::new(), Vec::new())));
     }
     options.cancel.check()?;
+    options
+        .fingerprinter
+        .before_comparison(&representative.path);
     let members: Vec<_> = pending
         .iter()
         .map(|r| (r.path.as_path(), &r.observation))
@@ -354,11 +385,12 @@ fn compare_batch<'a>(
             verdicts
         }
         Err(Error::Cancelled) => return Err(Error::Cancelled),
+        // Every error `equal_many` returns concerns the representative; member failures
+        // are per-member verdicts.
         Err(error) => {
-            for record in pending {
-                failed(record, &error)?;
-            }
-            return Ok((Vec::new(), Vec::new()));
+            store.remove_fingerprint(representative)?;
+            unresolved(store, representative, "compare", error.to_string())?;
+            return Ok(None);
         }
     };
     let mut equal = Vec::new();
@@ -370,5 +402,5 @@ fn compare_batch<'a>(
             compare::Verdict::Failed(error) => failed(record, &error)?,
         }
     }
-    Ok((equal, different))
+    Ok(Some((equal, different)))
 }

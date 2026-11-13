@@ -489,6 +489,27 @@ impl Store {
         Ok(())
     }
 
+    /// Drops the representative of `class_id` (it could not be compared) and promotes the
+    /// member with the smallest path in its place. Returns the new representative, or
+    /// `None` when the class had no other member and is gone.
+    pub fn replace_representative(&self, class_id: i64) -> Result<Option<FileRecord>> {
+        self.exec(
+            "DELETE FROM comparison_classes WHERE class_id=?1 AND representative=1",
+            params![class_id],
+        )?;
+        self.exec(
+            "UPDATE comparison_classes SET representative=1 WHERE rowid=(SELECT rowid FROM comparison_classes WHERE class_id=?1 ORDER BY path LIMIT 1)",
+            params![class_id],
+        )?;
+        self.wrote()?;
+        let sql = format!(
+            "SELECT {RECORD_COLUMNS} FROM comparison_classes JOIN files ON files.id = comparison_classes.file_id WHERE class_id=?1 AND representative=1"
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        let mut rows = statement.query_map(params![class_id], record_from_row)?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn add_comparison_member(&self, class_id: i64, record: &FileRecord) -> Result<()> {
         self.exec(
             "INSERT INTO comparison_classes(class_id,file_id,representative,path) VALUES(?1,?2,0,?3)",
