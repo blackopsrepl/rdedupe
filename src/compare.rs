@@ -28,32 +28,108 @@ pub fn equal(
     )
 }
 
-/// Like [`equal`], for two objects of one size class that must still be exactly as
-/// inventoried. A change since inventory (including a size change) is an
-/// [`crate::Error::Unstable`] error, never a "different" verdict.
-pub fn equal_expected(
-    a: (&Path, &Observation),
-    b: (&Path, &Observation),
+/// Outcome of comparing one member against a representative in [`equal_many`].
+#[derive(Debug)]
+pub enum Verdict {
+    Equal,
+    Different,
+    /// The member could not be compared (unreadable, or changed since inventory).
+    Failed(Error),
+}
+
+/// Compares one representative against several members of its size class in a single pass
+/// over the representative: every file is read at most once, chunk by chunk in lockstep,
+/// and a member drops out at its first differing chunk. Every member must still match its
+/// inventory observation, before and after; a member that does not is
+/// [`Verdict::Failed`], never "different". An error on the representative itself fails
+/// the whole call. Returns one verdict per member and the bytes read.
+pub fn equal_many(
+    representative: (&Path, &Observation),
+    members: &[(&Path, &Observation)],
     buffer_bytes: usize,
     cancel: &Cancellation,
-) -> Result<(bool, u64)> {
-    if a.1.size != b.1.size {
-        // Different inventoried sizes: different content, without reading.
-        return Ok((false, 0));
+) -> Result<(Vec<Verdict>, u64)> {
+    let mut verdicts: Vec<Option<Verdict>> = members.iter().map(|_| None).collect();
+    let size = representative.1.size;
+    let chunk = (buffer_bytes / 2).max(4096).min(
+        usize::try_from(size)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1),
+    );
+    struct Live<'a> {
+        index: usize,
+        path: &'a Path,
+        file: File,
+        before: Observation,
+        buffer: Vec<u8>,
     }
-    let (left, left_before) = open_expected(a.0, a.1)?;
-    let (right, right_before) = open_expected(b.0, b.1)?;
-    if left_before.size != right_before.size {
-        return Err(Error::Unstable(
-            "objects of one size class differ in size".into(),
-        ));
+    let mut live = Vec::with_capacity(members.len());
+    for (index, (path, expected)) in members.iter().enumerate() {
+        if expected.size != size {
+            verdicts[index] = Some(Verdict::Different);
+            continue;
+        }
+        match open_expected(path, expected) {
+            Ok((file, before)) => live.push(Live {
+                index,
+                path,
+                file,
+                before,
+                buffer: vec![0; chunk],
+            }),
+            Err(error) => verdicts[index] = Some(Verdict::Failed(error)),
+        }
     }
-    compare_open(
-        (a.0, left, &left_before),
-        (b.0, right, &right_before),
-        buffer_bytes,
-        cancel,
-    )
+    let mut total = 0u64;
+    if !live.is_empty() {
+        let (mut file, before) = open_expected(representative.0, representative.1)?;
+        let mut buffer = vec![0; chunk];
+        loop {
+            cancel.check()?;
+            let read = fill(&mut file, &mut buffer).map_err(|e| io("read", representative.0, e))?;
+            total += read as u64;
+            live.retain_mut(|member| {
+                match fill(&mut member.file, &mut member.buffer) {
+                    Ok(got) => {
+                        total += got as u64;
+                        if got == read && member.buffer[..got] == buffer[..read] {
+                            return true;
+                        }
+                        verdicts[member.index] = Some(
+                            match ensure_stable(member.path, &member.before, &member.file) {
+                                Ok(()) => Verdict::Different,
+                                Err(error) => Verdict::Failed(error),
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        verdicts[member.index] =
+                            Some(Verdict::Failed(io("read", member.path, error)))
+                    }
+                }
+                false
+            });
+            if live.is_empty() || read < chunk {
+                break;
+            }
+        }
+        ensure_stable(representative.0, &before, &file)?;
+        for member in live {
+            verdicts[member.index] = Some(
+                match ensure_stable(member.path, &member.before, &member.file) {
+                    Ok(()) => Verdict::Equal,
+                    Err(error) => Verdict::Failed(error),
+                },
+            );
+        }
+    }
+    Ok((
+        verdicts
+            .into_iter()
+            .map(|v| v.expect("every member has a verdict"))
+            .collect(),
+        total,
+    ))
 }
 
 fn compare_open(

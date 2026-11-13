@@ -75,6 +75,8 @@ pub struct Metrics {
     pub cached_fingerprints_reused: u64,
     pub eliminated_by_size: u64,
     pub eliminated_by_fingerprint: u64,
+    /// Candidates that shared a digest bucket but matched no other member byte for byte.
+    pub eliminated_by_comparison: u64,
     pub groups: u64,
     pub participants: u64,
     pub eligible_copies: u64,

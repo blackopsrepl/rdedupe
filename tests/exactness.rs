@@ -81,7 +81,7 @@ fn forced_collisions_keep_every_equality_class_a_b_b_c_a_c_d() {
     assert_eq!(expected, oracle(&[fixture.root()]));
     assert_eq!(result.summary.metrics.groups, 3);
     assert_eq!(
-        result.summary.metrics.eliminated_by_fingerprint, 1,
+        result.summary.metrics.eliminated_by_comparison, 1,
         "D stays unique"
     );
 }
@@ -294,18 +294,50 @@ fn a_file_changed_after_inventory_is_unresolved_never_unique() {
 #[test]
 fn sample_collisions_are_refined_with_linear_reads() {
     // N files identical in every sampled window, each different in unsampled bytes: the
-    // engine must not compare every file against every equality class.
-    let fixture = Fixture::new();
+    // engine must not compare every file against every equality class. Full-content reads
+    // are exactly N files; comparison reads stop at the class limit and do not grow with N.
     let size = 300 * 1024;
-    let n = 40u32;
-    for i in 0..n {
-        let mut content = vec![9u8; size];
-        content[100_000..100_004].copy_from_slice(&i.to_le_bytes());
+    let mut comparison = Vec::new();
+    for n in [40u32, 80] {
+        let fixture = Fixture::new();
+        for i in 0..n {
+            let mut content = vec![9u8; size];
+            content[100_000..100_004].copy_from_slice(&i.to_le_bytes());
+            fixture.write(format!("f{i:02}"), &content);
+        }
+        let result = library_scan(&[fixture.root()], Policy::default());
+        assert!(store_groups(&result).is_empty());
+        let metrics = &result.summary.metrics;
+        assert_eq!(metrics.full_hash_bytes_read, u64::from(n) * size as u64);
+        assert!(metrics.comparison_bytes_read < 4 * size as u64);
+        comparison.push(metrics.comparison_bytes_read);
+    }
+    assert_eq!(comparison[0], comparison[1]);
+}
+
+#[test]
+fn identical_buckets_read_each_member_once_per_representative_batch() {
+    // 12 identical files of three sample windows: no refinement, and one representative
+    // read per batch of `readers + 1` members instead of one per member.
+    let fixture = Fixture::new();
+    let size = 3 * 64 * 1024 + 7;
+    let content: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    for i in 0..12 {
         fixture.write(format!("f{i:02}"), &content);
     }
-    let result = library_scan(&[fixture.root()], Policy::default());
-    assert!(store_groups(&result).is_empty());
+    let budget = Budget {
+        readers: 2,
+        ..Budget::default()
+    };
+    let result = library_scan_with(
+        &[fixture.root()],
+        Policy::default(),
+        budget,
+        &Blake3Fingerprinter,
+    );
+    assert_eq!(store_groups(&result), oracle(&[fixture.root()]));
     let metrics = &result.summary.metrics;
-    assert_eq!(metrics.full_hash_bytes_read, u64::from(n) * size as u64);
-    assert_eq!(metrics.comparison_bytes_read, 0);
+    assert_eq!(metrics.full_hash_bytes_read, 0);
+    // 11 members in batches of 3: 4 representative passes + 11 member passes.
+    assert_eq!(metrics.comparison_bytes_read, 15 * size as u64);
 }

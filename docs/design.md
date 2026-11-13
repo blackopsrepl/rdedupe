@@ -51,13 +51,19 @@ discover → size classes → fingerprints → exact comparison → groups → a
 - **Fingerprints** (`src/fingerprint.rs`): BLAKE3 over the layout name, the size and three
   fixed 64 KiB windows (start, middle, end), read in buffer-sized chunks; small files are
   read once. Readers run in a bounded pool (`src/scheduler.rs`), each owning one buffer.
-- **Refinement** (`src/candidates.rs`): a sampled-digest bucket with more than two members
-  is split by a streamed full-content BLAKE3 before any comparison, so N files that agree
-  on every sampled window but differ elsewhere cost N reads, not up to N² comparisons. A
-  bucket of two goes straight to one comparison, which reads the same bytes.
-- **Exact comparison** (`src/compare.rs`): inside each bucket, each object is compared
-  with one representative of every equality class found so far, so a bucket holding
-  several distinct contents (a collision) still yields separate, exact groups. Every open
+- **Exact comparison** (`src/compare.rs`, `src/candidates.rs`): inside each bucket, members
+  are compared with one representative of every equality class found so far, so a bucket
+  holding several distinct contents (a collision) still yields separate, exact groups. One
+  representative is compared against a batch of `readers + 1` members in a single
+  lockstep pass (each file read once per pass; a member drops out at its first differing
+  chunk), so an all-identical bucket of N files costs about N + N/(readers + 1) file reads.
+  Fingerprint readers are idle during comparison, so the batch reuses their descriptors and
+  buffers.
+- **Refinement**: a sampled bucket of files larger than two windows that shows more than
+  two equality classes means the samples are blind to the differences. Its comparison
+  stops, every member's complete content is hashed (streamed BLAKE3), and comparison
+  restarts inside the full-content buckets, so N files that agree on every sampled window
+  but differ elsewhere cost N extra reads, never one comparison per class. Every open
   for fingerprinting, refinement and comparison checks the object against its inventory
   observation (identity, size, mtime, ctime); an object that changed after discovery is
   unresolved and makes the scan partial, never "unique".
