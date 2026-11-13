@@ -1,0 +1,30 @@
+tagPrefix = "v"
+releaseCommitMessageFormat = "chore(release): {{currentTag}}"
+commitUrlFormat = "https://github.com/blackopsrepl/rdedupe/commit/{{hash}}"
+compareUrlFormat = "https://github.com/blackopsrepl/rdedupe/compare/{{previousTag}}...{{currentTag}}"
+issueUrlFormat = "https://github.com/blackopsrepl/rdedupe/issues/{{id}}"
+noBumpWhenEmptyChanges = true
+suppressRevertPairs = true
+
+types = [
+  { type = "feat", section = "Features" },
+  { type = "fix", section = "Bug Fixes" },
+  { type = "refactor", section = "Code Refactoring" },
+  { type = "perf", section = "Performance Improvements" },
+  { type = "build", section = "Build System" },
+  { type = "docs", section = "Documentation" },
+  { type = "chore", hidden = true },
+  { type = "test", hidden = true },
+  { type = "style", hidden = true },
+  { type = "ci", hidden = true }
+]
+
+packageFiles = [
+  { filename = "Cargo.toml", type = "regex", pattern = '^version = "([0-9]+\.[0-9]+\.[0-9]+)"', versionGroup = 1 }
+]
+bumpFiles = [
+  { filename = "Cargo.toml", type = "regex", pattern = '^version = "([0-9]+\.[0-9]+\.[0-9]+)"', versionGroup = 1 },
+  { filename = "Cargo.lock", type = "regex", pattern = '^name = "rdedupe"$[[:space:]]^version = "([0-9]+\.[0-9]+\.[0-9]+)"', versionGroup = 1 },
+  { filename = "skills/rdedupe/SKILL.md", type = "regex", pattern = '^  version: "([0-9]+\.[0-9]+\.[0-9]+)"', versionGroup = 1 },
+  { filename = "skills/rdedupe/templates/completion-report.md", type = "regex", pattern = ', skill ([0-9]+\.[0-9]+\.[0-9]+)$', versionGroup = 1 }
+]
