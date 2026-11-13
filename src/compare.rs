@@ -1,7 +1,7 @@
 use crate::error::{io, Error, Result};
 use crate::fileinfo::{ensure_stable, open_expected, open_observed};
 use crate::model::Observation;
-use crate::scheduler::Cancellation;
+use crate::scheduler::{BufferPool, Cancellation};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -46,22 +46,33 @@ pub enum Verdict {
 pub fn equal_many(
     representative: (&Path, &Observation),
     members: &[(&Path, &Observation)],
-    buffer_bytes: usize,
+    pool: &BufferPool,
     cancel: &Cancellation,
 ) -> Result<(Vec<Verdict>, u64)> {
     let mut verdicts: Vec<Option<Verdict>> = members.iter().map(|_| None).collect();
     let size = representative.1.size;
-    let chunk = (buffer_bytes / 2).max(4096).min(
+    // Each pooled buffer is split into two halves, one per open file, so a batch of
+    // `readers + 1` members plus the representative fits in the pool's `readers + 1`
+    // buffers. One byte more than the file needs is enough to see its end in one read.
+    let chunk = (pool.buffer_size() / 2).min(
         usize::try_from(size)
             .unwrap_or(usize::MAX)
             .saturating_add(1),
     );
-    struct Live<'a> {
+    let mut leases: Vec<_> = (0..(members.len() + 1).div_ceil(2))
+        .map(|_| pool.take())
+        .collect();
+    let mut halves = leases.iter_mut().flat_map(|lease| {
+        let (a, b) = lease.split_at_mut(pool.buffer_size() / 2);
+        [&mut a[..chunk], &mut b[..chunk]]
+    });
+    let buffer = halves.next().expect("representative buffer");
+    struct Live<'a, 'b> {
         index: usize,
         path: &'a Path,
         file: File,
         before: Observation,
-        buffer: Vec<u8>,
+        buffer: &'b mut [u8],
     }
     let mut live = Vec::with_capacity(members.len());
     for (index, (path, expected)) in members.iter().enumerate() {
@@ -75,7 +86,7 @@ pub fn equal_many(
                 path,
                 file,
                 before,
-                buffer: vec![0; chunk],
+                buffer: halves.next().expect("member buffer"),
             }),
             Err(error) => verdicts[index] = Some(Verdict::Failed(error)),
         }
@@ -83,13 +94,12 @@ pub fn equal_many(
     let mut total = 0u64;
     if !live.is_empty() {
         let (mut file, before) = open_expected(representative.0, representative.1)?;
-        let mut buffer = vec![0; chunk];
         loop {
             cancel.check()?;
-            let read = fill(&mut file, &mut buffer).map_err(|e| io("read", representative.0, e))?;
+            let read = fill(&mut file, buffer).map_err(|e| io("read", representative.0, e))?;
             total += read as u64;
             live.retain_mut(|member| {
-                match fill(&mut member.file, &mut member.buffer) {
+                match fill(&mut member.file, member.buffer) {
                     Ok(got) => {
                         total += got as u64;
                         if got == read && member.buffer[..got] == buffer[..read] {

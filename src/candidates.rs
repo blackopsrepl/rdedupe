@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::fingerprint::Fingerprinter;
 use crate::model::{FileRecord, Metrics, Unresolved};
 use crate::paths::{display_path, path_bytes, EncodedPath};
-use crate::scheduler::{bounded_map, Cancellation, Progress};
+use crate::scheduler::{bounded_map, BufferPool, Cancellation, Progress};
 use crate::store::Store;
 
 pub struct Options<'a> {
@@ -23,6 +23,8 @@ pub struct Options<'a> {
     pub trust_cache: bool,
     pub cancel: &'a Cancellation,
     pub progress: Progress,
+    /// The scan's `readers + 1` read buffers, reused by every stage.
+    pub buffers: &'a BufferPool,
 }
 
 fn unresolved(store: &Store, record: &FileRecord, operation: &str, message: String) -> Result<()> {
@@ -75,19 +77,15 @@ fn fingerprint_candidates(
                     }
                     todo.push(record);
                 }
-                let results = bounded_map(
-                    &todo,
-                    budget.readers,
-                    budget.buffer_bytes,
-                    |record, buffer| {
+                let results =
+                    bounded_map(&todo, budget.readers, options.buffers, |record, buffer| {
                         options.fingerprinter.fingerprint(
                             &record.path,
                             &record.observation,
                             buffer,
                             options.cancel,
                         )
-                    },
-                );
+                    });
                 for (record, result) in todo.iter().zip(results) {
                     done += 1;
                     options.progress.tick("fingerprinted", done);
@@ -141,19 +139,11 @@ fn refine_flagged(store: &Store, options: &Options<'_>, metrics: &mut Metrics) -
             return Ok(());
         };
         last_path = Some(path_bytes(&last.path).to_vec());
-        let results = bounded_map(
-            &page,
-            budget.readers,
-            budget.buffer_bytes,
-            |record, buffer| {
-                options.fingerprinter.refine(
-                    &record.path,
-                    &record.observation,
-                    buffer,
-                    options.cancel,
-                )
-            },
-        );
+        let results = bounded_map(&page, budget.readers, options.buffers, |record, buffer| {
+            options
+                .fingerprinter
+                .refine(&record.path, &record.observation, buffer, options.cancel)
+        });
         for (record, result) in page.iter().zip(results) {
             match result {
                 Ok((refined, bytes)) => {
@@ -342,7 +332,7 @@ fn compare_batch<'a>(
     let outcome = compare::equal_many(
         (&representative.path, &representative.observation),
         &members,
-        options.budget.buffer_bytes,
+        options.buffers,
         options.cancel,
     );
     let failed = |record: &FileRecord, error: &dyn std::fmt::Display| -> Result<()> {

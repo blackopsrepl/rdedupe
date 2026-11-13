@@ -62,6 +62,9 @@ pub fn scan_with(
     };
     let mut loaded = None;
     let mut metrics = crate::model::Metrics::default();
+    // Allocated once: `readers` fingerprint buffers plus one, lent to every stage.
+    let buffers =
+        crate::scheduler::BufferPool::new(config.budget.readers + 1, config.budget.buffer_bytes);
     // Every stage checks `cancel`; an interrupt at any point yields a summary marked
     // cancelled with whatever was established so far.
     let outcome = (|| -> Result<()> {
@@ -96,6 +99,7 @@ pub fn scan_with(
                 trust_cache: matches!(loaded, Some(cache::Loaded::Entries(_))),
                 cancel,
                 progress,
+                buffers: &buffers,
             },
             &mut metrics,
         )?;
