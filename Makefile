@@ -1,10 +1,11 @@
 # Recipes run under bash with pipefail: a failing command piped into grep or tee fails
-# its target.
+# its target. Never pipe into `grep -q` or `head`: they exit early, the writer dies of
+# SIGPIPE (141) and the target fails at random; read the whole input instead.
 SHELL := bash
 .SHELLFLAGS := -o pipefail -c
 
 BINARY := rdedupe
-VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+VERSION := $(shell awk -F'"' '/^version = /{print $$2; exit}' Cargo.toml)
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 CARGO ?= cargo
 CARGO_TARGET_DIR ?= target
@@ -117,10 +118,10 @@ dist-check:
 		skills/rdedupe/scripts/summarize.py docs/safety.md docs/formats.md docs/cli.md \
 		docs/design.md docs/migration.md docs/agent-operation.md docs/benchmarks.md; do \
 		test -f $(DIST_DIR)/verify/$(PACKAGE)/$$f || { echo "missing $$f"; exit 1; }; done
-	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe --version | grep -qx "rdedupe $(VERSION)"
+	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe --version | grep -x "rdedupe $(VERSION)" >/dev/null
 	grep -q 'version: "$(VERSION)"' $(DIST_DIR)/verify/$(PACKAGE)/skills/rdedupe/SKILL.md
 	mkdir -p $(DIST_DIR)/verify/tree && printf same > $(DIST_DIR)/verify/tree/a && printf same > $(DIST_DIR)/verify/tree/b
-	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe scan $(DIST_DIR)/verify/tree --format jsonl | grep -q '"groups":1'
+	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe scan $(DIST_DIR)/verify/tree --format jsonl | grep '"groups":1' >/dev/null
 	rm -rf $(DIST_DIR)/verify
 	@echo "$(PACKAGE).tar.gz verified"
 
