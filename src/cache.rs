@@ -114,7 +114,7 @@ pub fn load(path: &Path, store: &Store, cancel: &crate::scheduler::Cancellation)
     Ok(Loaded::Entries(count))
 }
 
-/// Removes `<cache>.tmp-<pid>` files left by rdedupe processes that no longer exist (an
+/// Removes `<cache>.tmp-<pid>-<nanos>` files left by rdedupe processes that no longer exist (an
 /// update interrupted by `kill -9` or power loss). The published cache is never touched
 /// by an interrupted update: it is replaced only by a complete, synced file.
 fn remove_stale_temporaries(path: &Path) -> Result<()> {
@@ -138,6 +138,7 @@ fn remove_stale_temporaries(path: &Path) -> Result<()> {
         let Some(pid) = file_name
             .to_str()
             .and_then(|n| n.strip_prefix(&lead))
+            .and_then(|rest| rest.split('-').next())
             .and_then(|p| p.parse::<u32>().ok())
         else {
             continue;
@@ -216,7 +217,13 @@ pub fn write(path: &Path, store: &Store, slot: Slot) -> Result<u64> {
     std::fs::create_dir_all(parent).map_err(|e| io("create cache directory", parent, e))?;
     remove_stale_temporaries(path)?;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".tmp-{}", std::process::id()));
+    // The pid identifies the writer for stale-file cleanup; the timestamp keeps two writers
+    // in one process (or a reused pid) from colliding.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    name.push(format!(".tmp-{}-{nanos}", std::process::id()));
     let temporary = parent.join(name);
     let file = OpenOptions::new()
         .create_new(true)

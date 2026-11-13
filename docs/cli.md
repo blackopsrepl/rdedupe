@@ -12,6 +12,9 @@ rdedupe plan /data --action extent --output share.plan   # share storage instead
 rdedupe capabilities
 ```
 
+`tests/cli.rs` runs every line of this block, in order, against a fixture and checks its
+documented effect (and does the same for the workflow printed by `rdedupe --help`).
+
 Every flag, record field and exit code is documented in
 [`skills/rdedupe/references/commands.md`](../skills/rdedupe/references/commands.md),
 which `tests/agent_skill.rs` checks against `--help` in both directions.

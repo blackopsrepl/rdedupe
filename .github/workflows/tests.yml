@@ -15,8 +15,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: All suites (exactness, discovery, plans, recovery, resources, skill)
-        run: cargo test --locked --all-targets -- --nocapture
+      - name: All suites via the Makefile gate (exactness, discovery, plans, recovery, resources, skill)
+        run: make test
   msrv:
     name: Minimum supported Rust (1.85)
     runs-on: ubuntu-latest

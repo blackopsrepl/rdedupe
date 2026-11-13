@@ -207,7 +207,7 @@ fn classify_bucket(
     // Samples cover every byte up to two windows; beyond that, many classes in one sampled
     // bucket mean the samples are blind to the differences.
     let limited = phase == SAMPLED && last.observation.size > 2 * crate::fingerprint::WINDOW;
-    if (first.len() as u64) < crate::store::PAGE {
+    if (first.len() as u64) < store.page_rows() {
         return classify_in_memory(store, options, metrics, &first, limited);
     }
     store.reset_comparison_classes()?;

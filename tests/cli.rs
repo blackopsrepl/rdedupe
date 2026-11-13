@@ -239,3 +239,188 @@ fn capabilities_lists_formats() {
             "journal-schema=rdedupe-journal-v1",
         ));
 }
+
+/// SIGINT during content comparison stops the scan promptly with exit 130 and a
+/// `cancelled` summary that cannot be planned from.
+#[test]
+fn sigint_cancels_with_exit_130_and_a_cancelled_summary() {
+    let fixture = Fixture::new();
+    // Two 8 GiB sparse files of identical zeros: comparing them takes far longer than the
+    // signal delay.
+    for name in ["a", "b"] {
+        std::fs::File::create(fixture.path(name))
+            .unwrap()
+            .set_len(8 << 30)
+            .unwrap();
+    }
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rdedupe"))
+        .args(["scan", fixture.str(), "--format", "jsonl"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) },
+        0
+    );
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "cancellation took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(output.status.code(), Some(130));
+    let records = jsonl(&output.stdout);
+    assert_eq!(summary(&records)["completeness"], "cancelled");
+}
+
+/// Substitutes fixture paths into a documented command line and splits a `> FILE`
+/// redirection off.
+fn documented(line: &str, data: &Fixture, work: &Fixture) -> (Vec<String>, Option<String>) {
+    let command = line.split(" # ").next().unwrap().trim();
+    let (command, redirect) = match command.split_once(" > ") {
+        Some((c, file)) => (c, Some(work.path(file.trim()).to_str().unwrap().to_owned())),
+        None => (command, None),
+    };
+    let words = command
+        .split_whitespace()
+        .skip(1) // `rdedupe`
+        .map(|w| {
+            if let Some(rest) = w.strip_prefix("/data") {
+                format!("{}{rest}", data.str())
+            } else if w == "DIR" {
+                data.str().to_owned()
+            } else if w.ends_with(".plan") || w.ends_with(".journal") || w.ends_with(".jsonl") {
+                work.path(w).to_str().unwrap().to_owned()
+            } else {
+                w.to_owned()
+            }
+        })
+        .collect();
+    (words, redirect)
+}
+
+fn run_documented(words: &[String], redirect: Option<&str>) -> std::process::Output {
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("rdedupe"))
+        .args(words)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    if let Some(file) = redirect {
+        std::fs::write(file, &output.stdout).unwrap();
+    }
+    output
+}
+
+/// Runs every example of docs/cli.md in order against a fixture and checks its documented
+/// effect. `apply` and `purge` without a terminal refuse with exit 3, as documented; the
+/// same command is then confirmed with `--force`.
+#[test]
+fn docs_cli_examples_run_as_documented() {
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/cli.md")).unwrap();
+    let block = doc
+        .split("```console\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let data = Fixture::new();
+    data.write("originals/photo", b"same bytes");
+    data.write("copies/photo", b"same bytes");
+    data.write("copies/other", b"different");
+    let work = Fixture::new();
+    let mut ran = Vec::new();
+    for line in block.lines().filter(|l| l.starts_with("rdedupe ")) {
+        let (mut words, redirect) = documented(line, &data, &work);
+        let mut output = run_documented(&words, redirect.as_deref());
+        if matches!(words[0].as_str(), "apply" | "purge") {
+            assert_eq!(
+                output.status.code(),
+                Some(3),
+                "{line}: no terminal, no --force"
+            );
+            words.push("--force".into());
+            output = run_documented(&words, redirect.as_deref());
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{line}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        match words[0].as_str() {
+            "apply" => {
+                assert!(!data.exists("copies/photo"), "{line}: copy quarantined");
+                assert!(
+                    data.exists("originals/photo"),
+                    "{line}: protected keeper kept"
+                );
+            }
+            "restore" => assert_eq!(data.read("copies/photo"), b"same bytes"),
+            "recover" => assert!(!data.exists("copies/photo"), "recover is read-only"),
+            "scan" if redirect.is_some() => {
+                let records = jsonl(&std::fs::read(redirect.as_ref().unwrap()).unwrap());
+                assert_eq!(machine_groups(&records).len(), 1);
+            }
+            "plan" => assert!(std::fs::metadata(words.last().unwrap()).unwrap().len() > 0),
+            _ => {}
+        }
+        ran.push(words[0].clone());
+    }
+    assert_eq!(
+        ran,
+        [
+            "scan",
+            "scan",
+            "plan",
+            "apply",
+            "recover",
+            "restore",
+            "purge",
+            "plan",
+            "capabilities"
+        ]
+    );
+    // Restore put everything back, so purge had nothing to remove.
+    assert_eq!(data.read("copies/photo"), b"same bytes");
+    assert_eq!(data.read("copies/other"), b"different");
+}
+
+/// The workflow printed by `rdedupe --help` runs as shown.
+#[test]
+fn help_workflow_examples_run_as_shown() {
+    let help = String::from_utf8(rdedupe().arg("--help").output().unwrap().stdout).unwrap();
+    let workflow = help
+        .split("Workflow:\n")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap();
+    let data = Fixture::new();
+    data.write("a", b"same");
+    data.write("b", b"same");
+    let work = Fixture::new();
+    let mut ran = Vec::new();
+    for line in workflow.lines().map(str::trim) {
+        let line = line.split("   ").next().unwrap();
+        let (mut words, _) = documented(line, &data, &work);
+        if matches!(words[0].as_str(), "apply" | "purge") {
+            words.push("--force".into());
+        }
+        let output = run_documented(&words, None);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{line}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ran.push(words[0].clone());
+    }
+    assert_eq!(ran, ["scan", "plan", "apply", "restore", "purge"]);
+    assert_eq!(data.read("a"), b"same");
+    assert_eq!(data.read("b"), b"same");
+}

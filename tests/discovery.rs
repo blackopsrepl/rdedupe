@@ -243,3 +243,50 @@ fn pattern_matches_full_path_substrings() {
         ])])
     );
 }
+
+/// `--one-file-system` stops at mount points; without it the walk descends into them.
+/// Needs a mount point below a scannable root: `/dev/shm` (its own tmpfs) under `/dev`.
+#[test]
+fn mount_policy_is_explicit() {
+    use std::os::unix::fs::MetadataExt;
+    let (parent, mount) = (
+        std::path::Path::new("/dev"),
+        std::path::Path::new("/dev/shm"),
+    );
+    let (Ok(p), Ok(m)) = (std::fs::metadata(parent), std::fs::metadata(mount)) else {
+        eprintln!("SKIP: no /dev/shm mount point on this system");
+        return;
+    };
+    if p.dev() == m.dev() {
+        eprintln!("SKIP: /dev/shm is not a separate mount here");
+        return;
+    }
+    let Ok(fixture) = std::panic::catch_unwind(|| Fixture::new_in(mount)) else {
+        eprintln!("SKIP: /dev/shm is not writable");
+        return;
+    };
+    fixture.write("a", b"on another filesystem");
+    fixture.write("b", b"on another filesystem");
+    let name = fixture
+        .root()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let paths = |extra: &[&str]| {
+        let mut args = vec!["/dev", "--pattern", name.as_str()];
+        args.extend_from_slice(extra);
+        let records = scan_jsonl(args);
+        (
+            summary(&records)["metrics"]["paths"].as_u64().unwrap(),
+            machine_groups(&records).len(),
+        )
+    };
+    assert_eq!(paths(&[]), (2, 1), "descends into the mount by default");
+    assert_eq!(
+        paths(&["--one-file-system"]),
+        (0, 0),
+        "--one-file-system stays on the root's filesystem"
+    );
+}

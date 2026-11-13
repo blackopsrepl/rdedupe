@@ -31,5 +31,7 @@ pub fn finish(
             }
             Ok(())
         })
-    })
+    })?;
+    metrics.inventory_bytes = store.database_bytes()?;
+    Ok(())
 }

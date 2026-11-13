@@ -17,7 +17,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Rows fetched per cursor page. Fixed so that memory per page is independent of input size.
-pub const PAGE: u64 = 256;
 /// Writes per scratch transaction.
 const BATCH: u64 = 4096;
 
@@ -33,6 +32,8 @@ pub struct Store {
     keep: bool,
     pending: Cell<u64>,
     abandoned_removed: u64,
+    /// Records per page ([`Budget::queue_rows`]).
+    page: u64,
 }
 
 fn record_from_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
@@ -70,6 +71,11 @@ pub struct CacheEntry {
 }
 
 impl Store {
+    /// Records per page.
+    pub fn page_rows(&self) -> u64 {
+        self.page
+    }
+
     pub fn create(budget: &Budget) -> Result<Self> {
         budget.validate()?;
         let base = budget
@@ -93,6 +99,7 @@ impl Store {
             keep: false,
             pending: Cell::new(0),
             abandoned_removed: abandoned,
+            page: budget.queue_rows as u64,
         };
         // The scratch database is disposable: durability is irrelevant, bounded memory and
         // bounded disk are what matter. No sync, no rollback journal (nothing is ever rolled
@@ -310,7 +317,7 @@ impl Store {
         )?;
         let after = after.map(|v| v as i64).unwrap_or(-1);
         let rows = statement
-            .query_map(params![after, PAGE as i64], |r| {
+            .query_map(params![after, self.page as i64], |r| {
                 Ok(r.get::<_, i64>(0)? as u64)
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -325,7 +332,7 @@ impl Store {
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
             .query_map(
-                params![size as i64, after.unwrap_or(&[]), PAGE as i64],
+                params![size as i64, after.unwrap_or(&[]), self.page as i64],
                 record_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -356,7 +363,10 @@ impl Store {
         );
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
-            .query_map(params![after.unwrap_or(&[]), PAGE as i64], record_from_row)?
+            .query_map(
+                params![after.unwrap_or(&[]), self.page as i64],
+                record_from_row,
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -401,9 +411,10 @@ impl Store {
             "SELECT refined FROM fingerprints WHERE phase=?3 AND refined > ?1 GROUP BY refined HAVING COUNT(*) > 1 ORDER BY refined LIMIT ?2",
         )?;
         let rows = statement
-            .query_map(params![after.unwrap_or(&[]), PAGE as i64, phase], |r| {
-                r.get(0)
-            })?
+            .query_map(
+                params![after.unwrap_or(&[]), self.page as i64, phase],
+                |r| r.get(0),
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -421,7 +432,7 @@ impl Store {
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
             .query_map(
-                params![digest, after.unwrap_or(&[]), PAGE as i64, phase],
+                params![digest, after.unwrap_or(&[]), self.page as i64, phase],
                 record_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -440,7 +451,7 @@ impl Store {
         );
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
-            .query_map(params![after, PAGE as i64], |r| {
+            .query_map(params![after, self.page as i64], |r| {
                 Ok((r.get::<_, i64>(RECORD_COLUMN_COUNT)?, record_from_row(r)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -498,7 +509,7 @@ impl Store {
                     "SELECT class_id, COUNT(*) FROM comparison_classes WHERE class_id > ?1 GROUP BY class_id ORDER BY class_id LIMIT ?2",
                 )?;
                 let rows = statement
-                    .query_map(params![last, PAGE as i64], |r| {
+                    .query_map(params![last, self.page as i64], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -550,7 +561,7 @@ impl Store {
             "SELECT DISTINCT group_id FROM groups WHERE group_id > ?1 ORDER BY group_id LIMIT ?2",
         )?;
         let ids = statement
-            .query_map(params![after, PAGE as i64], |row| row.get(0))?
+            .query_map(params![after, self.page as i64], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(ids)
     }
@@ -577,7 +588,7 @@ impl Store {
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
             .query_map(
-                params![group, after.unwrap_or(&[]), PAGE as i64],
+                params![group, after.unwrap_or(&[]), self.page as i64],
                 record_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -620,7 +631,7 @@ impl Store {
         );
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement
-            .query_map(params![after.unwrap_or(&[]), PAGE as i64], |r| {
+            .query_map(params![after.unwrap_or(&[]), self.page as i64], |r| {
                 Ok((
                     record_from_row(r)?,
                     r.get::<_, Option<Vec<u8>>>(RECORD_COLUMN_COUNT)?,
@@ -695,7 +706,7 @@ impl Store {
                     "SELECT path, operation, message, retry_safe, id FROM unresolved WHERE (path, id) > (?1, ?2) ORDER BY path, id LIMIT ?3",
                 )?;
                 let rows = statement
-                    .query_map(params![last.0, last.1, PAGE as i64], |r| {
+                    .query_map(params![last.0, last.1, self.page as i64], |r| {
                         let p: Vec<u8> = r.get(0)?;
                         Ok((
                             Unresolved {
@@ -719,6 +730,13 @@ impl Store {
                 f(item)?;
             }
         }
+    }
+
+    /// Current size of the inventory database (pages in use times page size).
+    pub fn database_bytes(&self) -> Result<u64> {
+        let pages = self.row("PRAGMA page_count", [], |r| r.get::<_, i64>(0))?;
+        let size = self.row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))?;
+        Ok((pages as u64).saturating_mul(size as u64))
     }
 
     pub fn base_metrics(&self, page_cache_bytes: u64) -> Result<Metrics> {

@@ -257,6 +257,7 @@ pub fn minimum_budget() -> rdedupe::Budget {
         descriptors: rdedupe::config::FIXED_DESCRIPTORS + 1,
         temp_bytes: 16 * 1024 * 1024,
         scratch_dir: None,
+        queue_rows: *rdedupe::config::QUEUE_ROWS.start(),
     }
 }
 

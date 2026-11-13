@@ -228,3 +228,85 @@ fn cli_refuses_a_source_file_as_cache() {
         .code(4);
     assert_eq!(std::fs::read(&precious).unwrap(), b"precious only copy");
 }
+
+/// Starts `rdedupe scan ROOT --cache CACHE` over two huge sparse duplicates and signals it
+/// mid-comparison.
+fn interrupt_scan(root: &std::path::Path, cache: &std::path::Path, signal: i32) -> Option<i32> {
+    let child = std::process::Command::new(assert_cmd::cargo::cargo_bin("rdedupe"))
+        .args([
+            "scan",
+            root.to_str().unwrap(),
+            "--format",
+            "jsonl",
+            "--cache",
+        ])
+        .arg(cache)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, signal) }, 0);
+    child.wait_with_output().unwrap().status.code()
+}
+
+fn temporaries(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().contains(".tmp-"))
+        .collect()
+}
+
+/// A cancelled or killed scan leaves the existing cache byte-for-byte intact and no
+/// temporary file behind; a temporary left by a dead writer is removed by the next run,
+/// one belonging to a live process is not touched.
+#[test]
+fn interrupted_scans_leave_the_existing_cache_intact() {
+    let fixture = Fixture::new();
+    let work = Fixture::new();
+    let cache = work.path("fingerprints.cache");
+    fixture.write("small-a", b"same");
+    fixture.write("small-b", b"same");
+    scan(fixture.root(), &cache, false, false);
+    let before = std::fs::read(&cache).unwrap();
+    for name in ["huge-a", "huge-b"] {
+        std::fs::File::create(fixture.path(name))
+            .unwrap()
+            .set_len(8 << 30)
+            .unwrap();
+    }
+    assert_eq!(
+        interrupt_scan(fixture.root(), &cache, libc::SIGINT),
+        Some(130)
+    );
+    assert_eq!(
+        std::fs::read(&cache).unwrap(),
+        before,
+        "SIGINT kept the cache"
+    );
+    assert!(temporaries(work.root()).is_empty());
+    assert_eq!(interrupt_scan(fixture.root(), &cache, libc::SIGKILL), None);
+    assert_eq!(
+        std::fs::read(&cache).unwrap(),
+        before,
+        "SIGKILL kept the cache"
+    );
+
+    // Leftovers: one from an exited process, one from a live one (this test).
+    let dead = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = dead.id();
+    let mut dead = dead;
+    dead.wait().unwrap();
+    let stale = work.path(format!("fingerprints.cache.tmp-{dead_pid}-1"));
+    let live = work.path(format!("fingerprints.cache.tmp-{}-1", std::process::id()));
+    std::fs::write(&stale, b"half-written").unwrap();
+    std::fs::write(&live, b"another writer").unwrap();
+    std::fs::remove_file(fixture.path("huge-a")).unwrap();
+    std::fs::remove_file(fixture.path("huge-b")).unwrap();
+    scan(fixture.root(), &cache, false, false);
+    assert!(!stale.exists(), "a dead writer's temporary is removed");
+    assert_eq!(std::fs::read(&live).unwrap(), b"another writer");
+    std::fs::remove_file(&live).unwrap();
+    assert!(temporaries(work.root()).is_empty());
+}

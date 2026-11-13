@@ -89,13 +89,105 @@ fn sparse(root: &Path) {
     }
 }
 
+/// 60,000 small files with only 64 distinct sizes, so most share a size with many others:
+/// at a 7 MiB budget the inventory is many times the page cache and every stage pages.
+fn large_inventory(root: &Path) {
+    for d in 0..60u64 {
+        let dir = root.join(format!("d{d:02}"));
+        fs::create_dir(&dir).unwrap();
+        for i in 0..1000u64 {
+            let n = d * 1000 + i;
+            // One file in three duplicates its predecessor.
+            let seed = if n % 3 == 2 { n - 1 } else { n };
+            fs::write(
+                dir.join(format!("{i:04}")),
+                bytes(seed, 64 + (seed % 64) as usize),
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn config(root: &Path, budget: Budget) -> ScanConfig {
+    ScanConfig {
+        roots: vec![root.to_path_buf()],
+        pattern: String::new(),
+        one_file_system: false,
+        budget,
+        cache: None,
+        fresh: false,
+        trust_cache: false,
+        progress: false,
+    }
+}
+
+fn median(mut samples: Vec<f64>) -> (f64, f64, f64) {
+    samples.sort_by(f64::total_cmp);
+    (
+        samples[samples.len() / 2],
+        samples[0],
+        samples[samples.len() - 1],
+    )
+}
+
+/// Repeat-scan speed with a fingerprint cache, published separately from fresh
+/// verification: `fresh` has no cache, `exact-with-cache` reads a valid cache but (being
+/// exact) still reads current content, `trusted-cache` reuses cached fingerprints
+/// (heuristic; plans refuse it). Groups are byte-verified in every mode.
+fn cache_modes(filter: Option<&str>) {
+    let name = "repeat-scan-cache";
+    if filter.is_some_and(|f| !name.contains(f)) {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("benchmark fixture");
+    let root = directory.path().join("tree");
+    fs::create_dir(&root).unwrap();
+    same_size_distinct(&root);
+    for i in 0..200u64 {
+        fs::write(root.join(format!("dup-{i:05}")), bytes(10_000 + i, 65_536)).unwrap();
+    }
+    let cache = directory.path().join("fingerprints.cache");
+    let mut warm = config(&root, Budget::default());
+    warm.cache = Some(cache.clone());
+    scan(warm, Policy::default(), &Cancellation::default()).expect("cache warm-up");
+    for (mode, cache_path, trust) in [
+        ("fresh", None, false),
+        ("exact-with-cache", Some(cache.clone()), false),
+        ("trusted-cache", Some(cache.clone()), true),
+    ] {
+        let mut samples = Vec::with_capacity(REPEATS);
+        let mut last = None;
+        for _ in 0..REPEATS {
+            let mut c = config(&root, Budget::default());
+            c.cache = cache_path.clone();
+            c.trust_cache = trust;
+            let started = Instant::now();
+            let result = scan(c, Policy::default(), &Cancellation::default()).expect("scan");
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            last = Some(result.summary);
+        }
+        let (mid, min, max) = median(samples);
+        let summary = last.unwrap();
+        let m = summary.metrics;
+        println!(
+            "{{\"workload\":\"{name}\",\"mode\":\"{mode}\",\"exactness\":\"{:?}\",\"repeats\":{REPEATS},\"median_ms\":{mid:.2},\"min_ms\":{min:.2},\"max_ms\":{max:.2},\"paths\":{},\"groups\":{},\"fingerprint_bytes\":{},\"cached_fingerprints_reused\":{},\"comparison_bytes\":{}}}",
+            summary.exactness,
+            m.paths,
+            m.groups,
+            m.fingerprint_bytes_read,
+            m.cached_fingerprints_reused,
+            m.comparison_bytes_read
+        );
+    }
+}
+
 fn main() {
     // `cargo test --all-targets` also runs bench targets; only `cargo bench` passes --bench.
     if !std::env::args().any(|a| a == "--bench") {
         println!("pipeline: run with `cargo bench --bench pipeline` (skipped under cargo test)");
         return;
     }
-    let workloads: [(&str, Builder, Budget); 10] = [
+    let workloads: [(&str, Builder, Budget); 11] = [
         ("unique-sizes", unique_sizes, Budget::default()),
         ("same-size-distinct", same_size_distinct, Budget::default()),
         ("shared-prefix", shared_prefix, Budget::default()),
@@ -115,6 +207,17 @@ fn main() {
                 ..Budget::default()
             },
         ),
+        (
+            "large-inventory-7mib-budget",
+            large_inventory,
+            Budget {
+                memory_bytes: 7 << 20,
+                buffer_bytes: 256 << 10,
+                readers: 1,
+                queue_rows: 64,
+                ..Budget::default()
+            },
+        ),
     ];
     let filter = std::env::args().skip(1).find(|a| !a.starts_with('-'));
     for (name, build, budget) in workloads {
@@ -128,16 +231,7 @@ fn main() {
         for _ in 0..REPEATS {
             let started = Instant::now();
             let result = scan(
-                ScanConfig {
-                    roots: vec![directory.path().to_path_buf()],
-                    pattern: String::new(),
-                    one_file_system: false,
-                    budget: budget.clone(),
-                    cache: None,
-                    fresh: false,
-                    trust_cache: false,
-                    progress: false,
-                },
+                config(directory.path(), budget.clone()),
                 Policy::default(),
                 &Cancellation::default(),
             )
@@ -148,7 +242,7 @@ fn main() {
         samples.sort_by(f64::total_cmp);
         let m = last.unwrap().metrics;
         println!(
-            "{{\"workload\":\"{name}\",\"repeats\":{REPEATS},\"median_ms\":{:.2},\"min_ms\":{:.2},\"max_ms\":{:.2},\"paths\":{},\"objects\":{},\"groups\":{},\"fingerprint_bytes\":{},\"full_hash_bytes\":{},\"comparison_bytes\":{},\"eliminated_by_size\":{},\"page_cache_bytes\":{}}}",
+            "{{\"workload\":\"{name}\",\"repeats\":{REPEATS},\"median_ms\":{:.2},\"min_ms\":{:.2},\"max_ms\":{:.2},\"paths\":{},\"objects\":{},\"groups\":{},\"fingerprint_bytes\":{},\"full_hash_bytes\":{},\"comparison_bytes\":{},\"eliminated_by_size\":{},\"page_cache_bytes\":{},\"inventory_bytes\":{}}}",
             samples[REPEATS / 2],
             samples[0],
             samples[REPEATS - 1],
@@ -159,7 +253,9 @@ fn main() {
             m.full_hash_bytes_read,
             m.comparison_bytes_read,
             m.eliminated_by_size,
-            m.sqlite_page_cache_bytes
+            m.sqlite_page_cache_bytes,
+            m.inventory_bytes
         );
     }
+    cache_modes(filter.as_deref());
 }

@@ -7,6 +7,13 @@ use support::*;
 
 /// Runs the binary with RLIMIT_NOFILE and returns (exit code, stdout, peak RSS in KiB).
 fn run_limited(args: &[&std::ffi::OsStr], nofile: u64) -> (i32, Vec<u8>, i64) {
+    let (code, stdout, rss, _) = run_measured(args, nofile);
+    (code, stdout, rss)
+}
+
+/// Like [`run_limited`], also returning the peak number of open descriptors sampled from
+/// `/proc/<pid>/fd` every millisecond (Linux; `None` elsewhere).
+fn run_measured(args: &[&std::ffi::OsStr], nofile: u64) -> (i32, Vec<u8>, i64, Option<usize>) {
     let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("rdedupe"));
     command
         .args(args)
@@ -25,6 +32,22 @@ fn run_limited(args: &[&std::ffi::OsStr], nofile: u64) -> (i32, Vec<u8>, i64) {
         });
     }
     let mut child = command.spawn().unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = {
+        let done = done.clone();
+        let fd_dir = std::path::PathBuf::from(format!("/proc/{}/fd", child.id()));
+        std::thread::spawn(move || {
+            let mut peak = None;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Ok(entries) = std::fs::read_dir(&fd_dir) {
+                    let n = entries.count();
+                    peak = Some(peak.map_or(n, |p: usize| p.max(n)));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            peak
+        })
+    };
     let mut stdout = Vec::new();
     std::io::Read::read_to_end(child.stdout.as_mut().unwrap(), &mut stdout).unwrap();
     let mut status = 0;
@@ -38,7 +61,84 @@ fn run_limited(args: &[&std::ffi::OsStr], nofile: u64) -> (i32, Vec<u8>, i64) {
     } else {
         usage.ru_maxrss
     };
-    (libc::WEXITSTATUS(status), stdout, max_rss_kib as i64)
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let peak_fds = sampler.join().unwrap();
+    (
+        libc::WEXITSTATUS(status),
+        stdout,
+        max_rss_kib as i64,
+        peak_fds,
+    )
+}
+
+#[test]
+fn an_inventory_far_larger_than_the_page_cache_stays_exact_and_bounded() {
+    // 60,000 paths at the smallest memory budget: the inventory database grows to several
+    // times the page cache, so every stage works from paged, on-disk state.
+    let fixture = Fixture::new();
+    let mut expected = Groups::new();
+    for d in 0..60 {
+        for i in 0..1000 {
+            fixture.write(
+                format!("d{d:02}/f{i:04}"),
+                format!("unique {d} {i}").as_bytes(),
+            );
+        }
+    }
+    for g in 0..200 {
+        let members: Vec<_> = (0..3)
+            .map(|k| fixture.write(format!("dup/{k}/g{g:03}"), format!("dup {g}").as_bytes()))
+            .collect();
+        expected.insert(group(&members));
+    }
+    let args: Vec<&std::ffi::OsStr> = vec![
+        "scan".as_ref(),
+        fixture.root().as_os_str(),
+        "--format".as_ref(),
+        "jsonl".as_ref(),
+        "--memory-mib".as_ref(),
+        "7".as_ref(),
+        "--readers".as_ref(),
+        "1".as_ref(),
+        "--queue".as_ref(),
+        "64".as_ref(),
+        "--descriptors".as_ref(),
+        "16".as_ref(),
+    ];
+    let (code, stdout, max_rss_kib, peak_fds) = run_measured(&args, 16);
+    assert_eq!(code, 0);
+    let records = jsonl(&stdout);
+    assert_eq!(machine_groups(&records), expected);
+    let metrics = &summary(&records)["metrics"];
+    assert_eq!(metrics["paths"].as_u64(), Some(60_600));
+    let page_cache = metrics["sqlite_page_cache_bytes"].as_u64().unwrap();
+    let inventory = metrics["inventory_bytes"].as_u64().unwrap();
+    eprintln!(
+        "inventory {inventory} bytes, page cache {page_cache} bytes, peak RSS {max_rss_kib} KiB, peak descriptors {peak_fds:?}"
+    );
+    assert!(
+        inventory > 3 * page_cache,
+        "inventory {inventory} must exceed the {page_cache} byte page cache several times"
+    );
+    assert!(
+        max_rss_kib < 32 * 1024,
+        "peak RSS {max_rss_kib} KiB for a 7 MiB budget"
+    );
+    if let Some(peak) = peak_fds {
+        assert!(peak <= 16, "peak descriptors {peak} above the budget of 16");
+    }
+}
+
+#[test]
+fn queue_depth_is_validated() {
+    for queue in ["8", "70000"] {
+        let output = rdedupe()
+            .args(["scan", ".", "--queue", queue])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(4), "--queue {queue}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("queue depth"));
+    }
 }
 
 #[test]

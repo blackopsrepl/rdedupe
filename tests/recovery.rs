@@ -791,11 +791,12 @@ fn a_failing_journal_write_stops_before_the_next_mutation_and_restores_cleanly()
         .env("TMPDIR", index.root())
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&status.stderr).into_owned();
     let status = status.status;
     assert_eq!(
         status.code(),
         Some(3),
-        "the run must stop with a not-retry-safe error"
+        "the run must stop with a not-retry-safe error; child stderr:\n{stderr}"
     );
     let journal_len = std::fs::metadata(work.path("journal")).unwrap().len();
     assert!(journal_len <= 48 * 1024);
@@ -808,5 +809,76 @@ fn a_failing_journal_write_stops_before_the_next_mutation_and_restores_cleanly()
     );
     for i in 0..60 {
         assert_eq!(fixture.read(format!("f{i:02}")), CONTENT, "f{i:02}");
+    }
+}
+
+/// Kill at every durable record of an extent action (prepared, per-chunk applied,
+/// committed): file contents never change, and `apply --resume` finishes the sharing.
+#[cfg(target_os = "linux")]
+#[test]
+fn crash_at_every_extent_record_keeps_contents_and_resume_finishes() {
+    let probe_dir = Fixture::new();
+    let extent = rdedupe::probe::filesystem(probe_dir.root()).unwrap().extent;
+    if extent != "supported" {
+        eprintln!("SKIP: filesystem does not support FIDEDUPERANGE: {extent}");
+        return;
+    }
+    let content: Vec<u8> = (0..40 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    for record in 1..=4u32 {
+        let fixture = Fixture::new();
+        let a = fixture.write("a", &content);
+        let b = fixture.write("b", &content);
+        let work = Fixture::new();
+        let result = library_scan(&[fixture.root()], Policy::default());
+        rdedupe::plan::write_plan(&result, &work.path("plan"), ActionKind::Extent).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "crash_child_process",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RDEDUPE_TEST_CRASH_AT", record.to_string())
+            .env("RDEDUPE_TEST_OPERATION", "apply")
+            .env("RDEDUPE_TEST_PLAN", work.path("plan"))
+            .env("RDEDUPE_TEST_JOURNAL", work.path("journal"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let mut records = 0;
+        rdedupe::journal::for_each(&work.path("journal"), |_| {
+            records += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            records, record,
+            "killed right after record {record}: {status:?}"
+        );
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            content,
+            "record {record}: keeper"
+        );
+        assert_eq!(
+            std::fs::read(&b).unwrap(),
+            content,
+            "record {record}: target"
+        );
+        let mut options = rdedupe::delete::ApplyOptions::new(65_536);
+        options.resume = true;
+        let summary = rdedupe::delete::execute_in(
+            &work.path("plan"),
+            &work.path("journal"),
+            &options,
+            &Cancellation::default(),
+            &rdedupe::journal::NoHooks,
+            |_| Ok(()),
+        )
+        .unwrap_or_else(|e| panic!("resume after record {record}: {e}"));
+        assert_eq!(summary.shared, 1, "record {record}: {summary:?}");
+        assert_eq!(std::fs::read(&b).unwrap(), content);
+        assert_eq!(std::fs::read(&a).unwrap(), content);
     }
 }

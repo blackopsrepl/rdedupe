@@ -61,6 +61,7 @@ fn legacy(cli: Cli, cancel: &Cancellation) -> Result<i32> {
             descriptors: 32,
             temp_mib: 8192,
             scratch_dir: None,
+            queue: 256,
         },
     };
     let result = run_scan(&common, cancel)?;
@@ -333,6 +334,7 @@ fn run_scan(args: &ScanCommon, cancel: &Cancellation) -> Result<ScanResult> {
                 descriptors: args.budget.descriptors,
                 temp_bytes: args.budget.temp_mib.saturating_mul(1024 * 1024),
                 scratch_dir: args.budget.scratch_dir.clone(),
+                queue_rows: args.budget.queue,
             },
             cache: args.cache.clone(),
             fresh: args.fresh,

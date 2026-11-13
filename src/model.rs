@@ -94,6 +94,10 @@ pub struct Metrics {
     pub logical_redundant_bytes: u64,
     pub estimated_allocated_bytes: u64,
     pub sqlite_page_cache_bytes: u64,
+    /// Size of the on-disk inventory database at the end of the scan. Larger than
+    /// `sqlite_page_cache_bytes` means the inventory did not fit in memory and was paged.
+    #[serde(default)]
+    pub inventory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

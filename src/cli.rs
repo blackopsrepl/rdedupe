@@ -145,6 +145,10 @@ pub struct BudgetArgs {
     /// Directory for the private scratch workspace (default: the system temporary directory).
     #[arg(long, value_name = "DIR")]
     pub scratch_dir: Option<PathBuf>,
+    /// Queue depth: records per batch handed between stages (16-65536; each is charged
+    /// 4 KiB of the memory budget).
+    #[arg(long, default_value_t = 256, value_name = "N")]
+    pub queue: usize,
 }
 
 #[derive(Args, Debug)]

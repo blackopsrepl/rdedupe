@@ -9,9 +9,14 @@ use std::path::PathBuf;
 pub const FIXED_DESCRIPTORS: usize = 3 + 1 + 4 + 2 + WALK_OPEN_DIRECTORIES + 1;
 /// Maximum directory handles the walker keeps open at once.
 pub const WALK_OPEN_DIRECTORIES: usize = 2;
-/// Allowance for allocator, stack, SQLite statements and page-sized records that are not
-/// part of the page cache or the read buffers.
-pub const FIXED_MEMORY_BYTES: u64 = 4 * 1024 * 1024;
+/// Allowance for allocator, stack and SQLite statements: everything that is not the page
+/// cache, the read buffers or the queue.
+pub const FIXED_MEMORY_BYTES: u64 = 3 * 1024 * 1024;
+/// Memory charged per queued record: the longest path the platform accepts
+/// (`PATH_MAX`, 4096 bytes on Linux) bounds a record's size.
+pub const QUEUE_RECORD_BYTES: u64 = 4096;
+/// Allowed queue depths (records per page handed between stages).
+pub const QUEUE_ROWS: std::ops::RangeInclusive<usize> = 16..=65_536;
 /// Smallest SQLite page cache the store accepts.
 pub const MIN_PAGE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -28,6 +33,14 @@ pub struct Budget {
     /// Upper bound on the scratch database size.
     pub temp_bytes: u64,
     pub scratch_dir: Option<PathBuf>,
+    /// Queue depth: records per page handed from the inventory to the readers and to
+    /// every later stage. Bounds every in-memory batch and the per-page result vectors.
+    #[serde(default = "default_queue_rows")]
+    pub queue_rows: usize,
+}
+
+fn default_queue_rows() -> usize {
+    256
 }
 
 impl Default for Budget {
@@ -39,6 +52,7 @@ impl Default for Budget {
             descriptors: 32,
             temp_bytes: 8 * 1024 * 1024 * 1024,
             scratch_dir: None,
+            queue_rows: default_queue_rows(),
         }
     }
 }
@@ -49,10 +63,17 @@ impl Budget {
         (self.readers as u64 + 1) * self.buffer_bytes as u64
     }
 
-    /// SQLite page-cache size derived from the memory budget after buffers and allowance.
+    /// Bytes charged for one page of queued records.
+    pub fn queue_bytes(&self) -> u64 {
+        self.queue_rows as u64 * QUEUE_RECORD_BYTES
+    }
+
+    /// SQLite page-cache size derived from the memory budget after buffers, queue and
+    /// allowance.
     pub fn page_cache_bytes(&self) -> u64 {
         self.memory_bytes
             .saturating_sub(self.buffer_total())
+            .saturating_sub(self.queue_bytes())
             .saturating_sub(FIXED_MEMORY_BYTES)
     }
 
@@ -69,11 +90,19 @@ impl Budget {
         if self.readers == 0 || self.readers > 64 {
             return Err(Error::Budget("readers must be between 1 and 64".into()));
         }
+        if !QUEUE_ROWS.contains(&self.queue_rows) {
+            return Err(Error::Budget(format!(
+                "queue depth must be between {} and {} records",
+                QUEUE_ROWS.start(),
+                QUEUE_ROWS.end()
+            )));
+        }
         if self.page_cache_bytes() < MIN_PAGE_CACHE_BYTES {
             return Err(Error::Budget(format!(
-                "memory budget {} bytes cannot hold {} bytes of read buffers, a {} byte allowance and the minimum {} byte page cache",
+                "memory budget {} bytes cannot hold {} bytes of read buffers, a {} byte queue, a {} byte allowance and the minimum {} byte page cache",
                 self.memory_bytes,
                 self.buffer_total(),
+                self.queue_bytes(),
                 FIXED_MEMORY_BYTES,
                 MIN_PAGE_CACHE_BYTES
             )));
