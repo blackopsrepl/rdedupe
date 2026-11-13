@@ -596,6 +596,44 @@ impl Store {
     }
 
     /// Calls `f` for every member of `group` in native path order.
+    /// Every hard-link alias of `object` (other paths to the same inode), in native path
+    /// order, paged like every other cursor.
+    pub fn for_each_alias(
+        &self,
+        object: &FileRecord,
+        mut f: impl FnMut(&FileRecord) -> Result<()>,
+    ) -> Result<()> {
+        if object.observation.links < 2 {
+            return Ok(());
+        }
+        let sql = format!(
+            "SELECT {RECORD_COLUMNS} FROM files WHERE size=?1 AND alias_of=?2 AND path > ?3 ORDER BY path LIMIT ?4"
+        );
+        let mut last: Vec<u8> = Vec::new();
+        loop {
+            let page: Vec<FileRecord> = {
+                let mut statement = self.conn.prepare_cached(&sql)?;
+                let rows = statement.query_map(
+                    params![
+                        object.observation.size as i64,
+                        object.id,
+                        last.as_slice(),
+                        self.page as i64
+                    ],
+                    record_from_row,
+                )?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let Some(tail) = page.last() else {
+                return Ok(());
+            };
+            last = path_bytes(&tail.path).to_vec();
+            for alias in &page {
+                f(alias)?;
+            }
+        }
+    }
+
     pub fn for_each_member(
         &self,
         group: i64,

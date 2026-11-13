@@ -189,13 +189,13 @@ fn memory_and_minimum_budgets_produce_identical_reports() {
         &[fixture.root()],
         Policy::default(),
         Budget::default(),
-        &rdedupe::fingerprint::Blake3Fingerprinter,
+        &rdedupe::fingerprint::SampleFingerprinter,
     );
     let small = library_scan_with(
         &[fixture.root()],
         Policy::default(),
         minimum_budget(),
-        &rdedupe::fingerprint::Blake3Fingerprinter,
+        &rdedupe::fingerprint::SampleFingerprinter,
     );
     let mut a = Vec::new();
     let mut b = Vec::new();
@@ -288,7 +288,7 @@ fn scratch_workspace_is_confined_and_removed() {
         &[fixture.root()],
         Policy::default(),
         budget,
-        &rdedupe::fingerprint::Blake3Fingerprinter,
+        &rdedupe::fingerprint::SampleFingerprinter,
     );
     assert_eq!(result.summary.metrics.paths, 2);
     assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 1);

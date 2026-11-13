@@ -29,7 +29,7 @@ reads: 786432 fingerprint bytes, 0 full-content bytes, 7059456 comparison bytes;
 ## Guarantees
 
 - **Exact.** A group means every member was compared byte for byte with another during
-  this scan, and neither changed while it was read. Fingerprints (BLAKE3 over the size and
+  this scan, and neither changed while it was read. Fingerprints (xxh3 over the size and
   three fixed 64 KiB windows) only separate candidates; files with a unique size are never
   opened.
 - **Complete or explicit.** Unreadable or changing files are listed as unresolved, the scan

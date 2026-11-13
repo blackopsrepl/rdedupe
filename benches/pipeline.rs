@@ -181,6 +181,44 @@ fn cache_modes(filter: Option<&str>) {
     }
 }
 
+/// Throughput of the digest used for fingerprints (BLAKE3) against xxh3 (a fast
+/// non-cryptographic hash, benchmark-only dependency) and the standard library's
+/// SipHash-1-3, over the same 64 MiB in 64 KiB windows (the sampling window size).
+fn hash_throughput(filter: Option<&str>) {
+    use std::hash::Hasher;
+    let name = "hash-throughput";
+    if filter.is_some_and(|f| !name.contains(f)) {
+        return;
+    }
+    let data = bytes(60_000, 64 << 20);
+    let run = |label: &str, digest: &dyn Fn(&[u8]) -> u64| {
+        let mut samples = Vec::with_capacity(REPEATS);
+        let mut sink = 0u64;
+        for _ in 0..REPEATS {
+            let started = Instant::now();
+            for window in data.chunks(64 << 10) {
+                sink ^= digest(window);
+            }
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let (mid, min, max) = median(samples);
+        println!(
+            "{{\"workload\":\"{name}\",\"hash\":\"{label}\",\"repeats\":{REPEATS},\"median_ms\":{mid:.2},\"min_ms\":{min:.2},\"max_ms\":{max:.2},\"mib_per_s\":{:.0},\"sink\":{sink}}}",
+            64.0 / (mid / 1000.0)
+        );
+    };
+    run("blake3", &|w| {
+        u64::from_le_bytes(blake3::hash(w).as_bytes()[..8].try_into().unwrap())
+    });
+    run("xxh3-64", &|w| xxhash_rust::xxh3::xxh3_64(w));
+    run("xxh3-128", &|w| xxhash_rust::xxh3::xxh3_128(w) as u64);
+    run("siphash-1-3 (std DefaultHasher)", &|w| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(w);
+        h.finish()
+    });
+}
+
 fn main() {
     // `cargo test --all-targets` also runs bench targets; only `cargo bench` passes --bench.
     if !std::env::args().any(|a| a == "--bench") {
@@ -258,4 +296,5 @@ fn main() {
         );
     }
     cache_modes(filter.as_deref());
+    hash_throughput(filter.as_deref());
 }

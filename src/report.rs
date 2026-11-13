@@ -29,6 +29,9 @@ pub fn write(scan: &ScanResult, format: Format, mut output: impl Write) -> Resul
 struct Member<'a> {
     group: i64,
     record: &'a FileRecord,
+    /// For a hard-link alias: the member path it is another name of. Aliases follow their
+    /// member; they are never keepers or eligible copies (removing one name frees nothing).
+    alias_of: Option<&'a std::path::Path>,
     keeper: bool,
     protected: bool,
     reason: String,
@@ -63,10 +66,25 @@ fn each_member(scan: &ScanResult, mut f: impl FnMut(&Member<'_>) -> Result<()>) 
             f(&Member {
                 group,
                 record,
+                alias_of: None,
                 keeper: is_keeper,
                 protected,
                 reason,
                 metadata_differs,
+            })?;
+            scan.store.for_each_alias(record, |alias| {
+                f(&Member {
+                    group,
+                    record: alias,
+                    alias_of: Some(&record.path),
+                    keeper: false,
+                    protected: scan.policy.is_protected(&alias.path),
+                    reason: format!(
+                        "hard-link alias of {}: the same file under another name; never acted on separately",
+                        display_path(&record.path)
+                    ),
+                    metadata_differs: Vec::new(),
+                })
             })
         })
     })
@@ -89,7 +107,9 @@ fn write_human(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
                 m.group, m.record.observation.size
             )?;
         }
-        let tag = if m.keeper {
+        let tag = if m.alias_of.is_some() {
+            "LINK"
+        } else if m.keeper {
             "KEEP"
         } else if m.protected {
             "PROT"
@@ -161,6 +181,7 @@ fn write_csv(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
         "keeper",
         "protected",
         "reason",
+        "alias_of_hex",
     ])?;
     each_member(scan, |m| {
         let path = EncodedPath::from_path(&m.record.path);
@@ -178,6 +199,9 @@ fn write_csv(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
             m.keeper,
             m.protected,
             &m.reason,
+            m.alias_of
+                .map(|p| EncodedPath::from_path(p).data)
+                .unwrap_or_default(),
         ))?;
         Ok(())
     })?;
@@ -192,6 +216,15 @@ struct UnresolvedRecord<'a> {
 }
 
 #[derive(Serialize)]
+struct AliasRecord {
+    record: &'static str,
+    group: i64,
+    path: EncodedPath,
+    alias_of: EncodedPath,
+    protected: bool,
+}
+
+#[derive(Serialize)]
 struct EndRecord {
     record: &'static str,
     schema: &'static str,
@@ -203,6 +236,20 @@ fn write_jsonl(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
     serde_json::to_writer(&mut *out, &scan.summary)?;
     out.write_all(b"\n")?;
     each_member(scan, |m| {
+        if let Some(of) = m.alias_of {
+            serde_json::to_writer(
+                &mut *out,
+                &AliasRecord {
+                    record: "alias",
+                    group: m.group,
+                    path: EncodedPath::from_path(&m.record.path),
+                    alias_of: EncodedPath::from_path(of),
+                    protected: m.protected,
+                },
+            )?;
+            out.write_all(b"\n")?;
+            return Ok(());
+        }
         let o = &m.record.observation;
         serde_json::to_writer(
             &mut *out,
@@ -251,12 +298,13 @@ fn write_jsonl(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// NUL-terminated native paths of every eligible copy (never keepers or members the
-/// policy retains), exactly the targets a plan would contain, suitable for `xargs -0`.
+/// NUL-terminated native paths of every eligible copy (never keepers, members the policy
+/// retains, or hard-link aliases), exactly the targets a plan would contain, suitable for
+/// `xargs -0`.
 /// Only meaningful for complete exact scans.
 fn write_nul(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
     each_member(scan, |m| {
-        if !m.keeper && scan.policy.retained_because(m.record).is_none() {
+        if m.alias_of.is_none() && !m.keeper && scan.policy.retained_because(m.record).is_none() {
             out.write_all(path_bytes(&m.record.path))?;
             out.write_all(&[0])?;
         }

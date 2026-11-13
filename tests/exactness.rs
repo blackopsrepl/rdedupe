@@ -1,7 +1,7 @@
 mod support;
 
 use rdedupe::fileinfo::observe_path;
-use rdedupe::fingerprint::{Blake3Fingerprinter, CollisionFingerprinter, Fingerprinter};
+use rdedupe::fingerprint::{CollisionFingerprinter, Fingerprinter, SampleFingerprinter};
 use rdedupe::model::Observation;
 use rdedupe::scheduler::Cancellation;
 use rdedupe::{Budget, Completeness, Exactness, Policy};
@@ -38,7 +38,7 @@ fn groups_are_identical_across_readers_buffers_and_budgets() {
             &[fixture.root()],
             Policy::default(),
             budget,
-            &Blake3Fingerprinter,
+            &SampleFingerprinter,
         );
         assert_eq!(
             store_groups(&result),
@@ -50,7 +50,7 @@ fn groups_are_identical_across_readers_buffers_and_budgets() {
         &[fixture.root()],
         Policy::default(),
         minimum_budget(),
-        &Blake3Fingerprinter,
+        &SampleFingerprinter,
     );
     assert_eq!(store_groups(&result), expected, "minimum budget");
 }
@@ -97,10 +97,10 @@ fn identical_samples_with_unsampled_difference_are_not_duplicates() {
     // Prove the production fingerprints really collide, so only full comparison separates.
     let mut buffer = vec![0; 65_536];
     let cancel = Cancellation::default();
-    let (fa, _) = Blake3Fingerprinter
+    let (fa, _) = SampleFingerprinter
         .fingerprint(&pa, &observe_path(&pa).unwrap(), &mut buffer, &cancel)
         .unwrap();
-    let (fb, _) = Blake3Fingerprinter
+    let (fb, _) = SampleFingerprinter
         .fingerprint(&pb, &observe_path(&pb).unwrap(), &mut buffer, &cancel)
         .unwrap();
     assert_eq!(fa, fb, "fixture must defeat the sampled fingerprint");
@@ -119,7 +119,7 @@ fn fingerprints_do_not_depend_on_the_buffer_size() {
     for size in [4096usize, 65_536, 1 << 20] {
         let mut buffer = vec![0; size];
         digests.insert(
-            Blake3Fingerprinter
+            SampleFingerprinter
                 .fingerprint(&path, &observe_path(&path).unwrap(), &mut buffer, &cancel)
                 .unwrap()
                 .0,
@@ -207,7 +207,7 @@ impl Fingerprinter for FailOn {
         if path.file_name().is_some_and(|n| n == self.0) {
             Err(rdedupe::Error::Unstable("injected read failure".into()))
         } else {
-            Blake3Fingerprinter.fingerprint(path, expected, buffer, cancel)
+            SampleFingerprinter.fingerprint(path, expected, buffer, cancel)
         }
     }
 }
@@ -264,7 +264,7 @@ impl Fingerprinter for RewriteBefore {
         if path.file_name().is_some_and(|n| n == self.name) {
             std::fs::write(path, &self.content).unwrap();
         }
-        Blake3Fingerprinter.fingerprint(path, expected, buffer, cancel)
+        SampleFingerprinter.fingerprint(path, expected, buffer, cancel)
     }
 }
 
@@ -333,11 +333,60 @@ fn identical_buckets_read_each_member_once_per_representative_batch() {
         &[fixture.root()],
         Policy::default(),
         budget,
-        &Blake3Fingerprinter,
+        &SampleFingerprinter,
     );
     assert_eq!(store_groups(&result), oracle(&[fixture.root()]));
     let metrics = &result.summary.metrics;
     assert_eq!(metrics.full_hash_bytes_read, 0);
     // 11 members in batches of 3: 4 representative passes + 11 member passes.
     assert_eq!(metrics.comparison_bytes_read, 15 * size as u64);
+}
+
+/// Collides every sampled digest (as crafted xxh3 collisions could) but keeps the real,
+/// collision-resistant full-content refinement.
+struct CraftedSampleCollisions;
+
+impl Fingerprinter for CraftedSampleCollisions {
+    fn fingerprint(
+        &self,
+        path: &std::path::Path,
+        expected: &rdedupe::model::Observation,
+        buffer: &mut [u8],
+        cancel: &Cancellation,
+    ) -> rdedupe::Result<([u8; 32], u64)> {
+        let (_, read) = SampleFingerprinter.fingerprint(path, expected, buffer, cancel)?;
+        Ok(([7; 32], read))
+    }
+}
+
+#[test]
+fn crafted_collisions_of_small_files_cost_linear_reads() {
+    // Small files are fully covered by their samples, but sample digests are not collision
+    // resistant: N distinct files forced into one sampled bucket are refined with BLAKE3
+    // (one extra read each) instead of being compared class by class.
+    let size = 4096usize;
+    let mut comparison = Vec::new();
+    for n in [40u32, 80] {
+        let fixture = Fixture::new();
+        for i in 0..n {
+            let mut content = vec![3u8; size];
+            content[..4].copy_from_slice(&i.to_le_bytes());
+            fixture.write(format!("f{i:02}"), &content);
+        }
+        let result = library_scan_with(
+            &[fixture.root()],
+            Policy::default(),
+            Budget::default(),
+            &CraftedSampleCollisions,
+        );
+        assert!(store_groups(&result).is_empty());
+        let metrics = &result.summary.metrics;
+        assert_eq!(metrics.full_hash_bytes_read, u64::from(n) * size as u64);
+        // Before the class limit trips, at most a few lockstep batches (a representative
+        // plus `readers + 1` members, each read whole) run: a constant, not a function of N.
+        eprintln!("n={n} comparison bytes {}", metrics.comparison_bytes_read);
+        assert!(metrics.comparison_bytes_read <= 3 * 6 * size as u64);
+        comparison.push(metrics.comparison_bytes_read);
+    }
+    assert_eq!(comparison[0], comparison[1]);
 }

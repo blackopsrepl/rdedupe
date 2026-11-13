@@ -1,6 +1,7 @@
 mod support;
 
 use rdedupe::journal::{JournalEntry, JournalHooks};
+use rdedupe::model::ActionStatus;
 use rdedupe::recovery::RecoverySummary;
 use rdedupe::scheduler::Cancellation;
 use rdedupe::{ActionKind, Policy};
@@ -300,14 +301,31 @@ fn crash_child_process() {
                 Ok(())
             }
         }
-        let result = rdedupe::delete::execute_with_hooks(
-            &plan,
-            &journal,
-            65_536,
-            &Cancellation::default(),
-            &LimitAfterFirstRecord(limit, Cell::new(false)),
-            |_| Ok(()),
-        );
+        let result = match std::env::var("RDEDUPE_TEST_OPERATION").as_deref() {
+            // restore and purge only append to the journal: limit it from the start.
+            Ok(operation @ ("restore" | "purge")) => {
+                let rl = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
+                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &rl) }, 0);
+                if operation == "restore" {
+                    rdedupe::recovery::restore(&journal, |_| {}).map(|_| ())
+                } else {
+                    rdedupe::recovery::purge(&journal, 65_536, &Cancellation::default(), |_| {})
+                        .map(|_| ())
+                }
+            }
+            _ => rdedupe::delete::execute_with_hooks(
+                &plan,
+                &journal,
+                65_536,
+                &Cancellation::default(),
+                &LimitAfterFirstRecord(limit, Cell::new(false)),
+                |_| Ok(()),
+            )
+            .map(|_| ()),
+        };
         let code = match result {
             Err(error) if !error.retry_safe() => 3,
             Err(error) => {
@@ -892,4 +910,112 @@ fn crash_at_every_extent_record_keeps_contents_and_resume_finishes() {
         assert_eq!(std::fs::read(&b).unwrap(), content);
         assert_eq!(std::fs::read(&a).unwrap(), content);
     }
+}
+
+/// Runs restore or purge in a child whose journal cannot grow: the first append fails with
+/// a real write error (EFBIG) after the filesystem step it records already happened.
+fn with_journal_full(case: &Case, operation: &str) -> (Option<i32>, String) {
+    let limit = std::fs::metadata(case.journal()).unwrap().len();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "crash_child_process",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("RDEDUPE_TEST_CRASH_AT", "1000000")
+        .env("RDEDUPE_TEST_FILE_SIZE_LIMIT", limit.to_string())
+        .env("RDEDUPE_TEST_OPERATION", operation)
+        .env("RDEDUPE_TEST_PLAN", case.plan())
+        .env("RDEDUPE_TEST_JOURNAL", case.journal())
+        .output()
+        .unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn restore_whose_journal_write_fails_is_finished_by_running_it_again() {
+    let case = Case::new();
+    apply(&case.plan(), &case.journal());
+    let (code, stderr) = with_journal_full(&case, "restore");
+    assert_eq!(code, Some(3), "not retry-safe: {stderr}");
+    // The first object may already be back; nothing is lost or duplicated.
+    let again = case.restore();
+    assert!(again.clean(), "{again:?}");
+    case.assert_all_restored();
+}
+
+#[test]
+fn purge_whose_journal_write_fails_is_finished_by_running_it_again() {
+    let case = Case::new();
+    apply(&case.plan(), &case.journal());
+    let (code, stderr) = with_journal_full(&case, "purge");
+    assert_eq!(code, Some(3), "not retry-safe: {stderr}");
+    let again = case.purge();
+    assert_eq!(again.conflicts, 0, "{again:?}");
+    assert_eq!(case.present(), vec!["a"]);
+    assert_eq!(case.fixture.read("a"), CONTENT);
+    assert!(case.quarantine_paths().iter().all(|q| !q.exists()));
+}
+
+/// Quarantine-directory creation fails part-way through a run (the second directory turns
+/// unwritable after the first group was handled): the failing action changes nothing, the
+/// earlier ones stay restorable.
+#[test]
+fn quarantine_directory_creation_failing_mid_run_leaves_everything_restorable() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIP: running as root, directory permissions do not restrict writes");
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.write("one/a", b"first group");
+    fixture.write("one/b", b"first group");
+    fixture.write("two/a", b"second group");
+    fixture.write("two/b", b"second group");
+    let work = Fixture::new();
+    let result = library_scan(&[fixture.root()], Policy::default());
+    rdedupe::plan::write_plan(&result, &work.path("plan"), ActionKind::Quarantine).unwrap();
+    struct LockSecondAfterFirst(PathBuf);
+    impl JournalHooks for LockSecondAfterFirst {
+        fn after_sync(&self, entry: &JournalEntry) -> rdedupe::Result<()> {
+            if entry.action == 1 && entry.state == rdedupe::journal::State::Committed {
+                std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+            }
+            Ok(())
+        }
+    }
+    let mut statuses = Vec::new();
+    let mut messages = Vec::new();
+    let outcome = rdedupe::delete::execute_with_hooks(
+        &work.path("plan"),
+        &work.path("journal"),
+        65_536,
+        &Cancellation::default(),
+        &LockSecondAfterFirst(fixture.path("two")),
+        |o| {
+            statuses.push(o.status);
+            messages.push(o.message.clone().unwrap_or_default());
+            Ok(())
+        },
+    );
+    std::fs::set_permissions(fixture.path("two"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The failure happens before the action's intent record: nothing changed, so the
+    // action is skipped (not `failed`) and the message carries the real error.
+    outcome.unwrap();
+    assert_eq!(
+        statuses,
+        [ActionStatus::Quarantined, ActionStatus::SkippedStale],
+        "{messages:?}"
+    );
+    assert!(messages[1].contains("Permission denied"), "{messages:?}");
+    assert!(!fixture.exists("one/b"));
+    assert_eq!(fixture.read("two/a"), b"second group");
+    assert_eq!(fixture.read("two/b"), b"second group");
+    let restored = rdedupe::recovery::restore(&work.path("journal"), |_| {}).unwrap();
+    assert_eq!(restored.conflicts + restored.missing, 0, "{restored:?}");
+    assert_eq!(fixture.read("one/b"), b"first group");
 }

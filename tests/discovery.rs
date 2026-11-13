@@ -290,3 +290,49 @@ fn mount_policy_is_explicit() {
         "--one-file-system stays on the root's filesystem"
     );
 }
+
+/// Hard-link aliases are named in every format, next to the object they belong to, and are
+/// never listed as copies to act on.
+#[test]
+fn hard_link_aliases_are_named_in_every_output() {
+    let fixture = Fixture::new();
+    let a = fixture.write("a", b"same bytes");
+    let link = fixture.hard_link("a", "a_link");
+    let b = fixture.write("b", b"same bytes");
+    let records = scan_jsonl([fixture.str()]);
+    let alias: Vec<_> = records.iter().filter(|r| r["record"] == "alias").collect();
+    assert_eq!(alias.len(), 1, "{records:?}");
+    assert_eq!(decode_path(&alias[0]["path"]), link);
+    assert_eq!(decode_path(&alias[0]["alias_of"]), a);
+    assert_eq!(machine_groups(&records), Groups::from([group([&a, &b])]));
+
+    let csv = rdedupe()
+        .args(["scan", fixture.str(), "--format", "csv"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(csv.stdout).unwrap();
+    assert!(text.lines().next().unwrap().ends_with(",alias_of_hex"));
+    let row = text
+        .lines()
+        .find(|l| l.contains("a_link"))
+        .expect("alias row");
+    assert!(row.ends_with(&hex::encode(bytes(&a))), "{row}");
+
+    let human = rdedupe().args(["scan", fixture.str()]).output().unwrap();
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        human.contains("LINK ") && human.contains("a_link"),
+        "{human}"
+    );
+
+    let nul = rdedupe()
+        .args(["scan", fixture.str(), "--format", "nul"])
+        .output()
+        .unwrap();
+    let listed: Vec<_> = nul
+        .stdout
+        .split(|c| *c == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    assert_eq!(listed, [bytes(&b).as_slice()], "only the eligible copy");
+}

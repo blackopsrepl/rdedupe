@@ -159,13 +159,14 @@ never by key order or line position within a kind.
 - `summary` (first): `schema`, `binary_version`, `completeness` (`complete`/`partial`/`cancelled`/`failed`), `exactness` (`exact`/`heuristic`), `unresolved` (count), `cache_provenance`, and `metrics` (`sqlite_page_cache_bytes` is the page-cache cap derived
 from the budget, not memory actually used): `paths`, `objects`, `aliases`, `symlinks_skipped`, `special_files_skipped`, `owned_dirs_skipped`, `candidate_objects`, `eliminated_by_size`, `eliminated_by_fingerprint` (unique sampled or full-content digest), `eliminated_by_comparison` (shared a digest but matched nothing byte for byte), `fingerprint_bytes_read`, `full_hash_bytes_read`, `comparison_bytes_read`, `cached_fingerprints_reused`, `groups`, `participants`, `eligible_copies`, `logical_redundant_bytes`, `estimated_allocated_bytes`, `sqlite_page_cache_bytes`, `inventory_bytes` (final size of the on-disk inventory; above `sqlite_page_cache_bytes` the inventory was paged rather than held in memory).
 - `member` (one per group member, ordered by group then path): `group`, `path`, `identity` (`device`, `inode`), `size`, `allocated`, `links`, `is_keeper`, `protected`, `reason`, `metadata_differs_from_keeper` (list of `permissions`, `owner`, `group`, `extended attributes` that differ from the keeper's; empty for the keeper). Removing a copy loses its metadata; plan reasons say so.
+- `alias` (right after its member, one per other hard-linked path to the same file): `group`, `path`, `alias_of` (the member's path), `protected`. An alias is the same file under another name: it is never a keeper or a copy, and removing it frees nothing.
 - `unresolved`: `path`, `operation` (`traverse`, `metadata`, `fingerprint`, `compare`), `message`, `retry_safe`.
 - `end` (last): `schema`, `groups`, `unresolved`. A stream without `end` was cut short.
 
 `apply --format jsonl`: one `outcome` per action (`group`, `target`, `kind`, `status`,
 `logical_bytes`, `message`), then `apply_summary` (`actions`, `quarantined`, `shared`,
 `skipped`, `failed`, `logical_bytes_moved_or_shared`). Statuses: `quarantined`, `shared`,
-`skipped_stale` (current facts no longer match the plan; nothing changed),
+`skipped_stale` (current facts no longer match the plan, or a precondition such as creating the quarantine directory failed before the action started; nothing changed; `message` says which),
 `skipped_group` (an earlier action in the group was refused), `failed` (the mutation
 started and stopped; see the journal).
 

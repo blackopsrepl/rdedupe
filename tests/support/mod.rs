@@ -216,7 +216,7 @@ pub fn library_scan(roots: &[&Path], policy: rdedupe::Policy) -> rdedupe::ScanRe
         roots,
         policy,
         rdedupe::Budget::default(),
-        &rdedupe::fingerprint::Blake3Fingerprinter,
+        &rdedupe::fingerprint::SampleFingerprinter,
     )
 }
 

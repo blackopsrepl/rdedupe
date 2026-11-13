@@ -2,7 +2,7 @@
 name: rdedupe
 description: Find exact duplicate files and, only when authorized, quarantine, restore, purge or extent-share them with rdedupe 3.x. Use for duplicate reports, disk cleanup, saved-plan review, and recovering interrupted rdedupe runs.
 license: CC0-1.0
-compatibility: Requires the rdedupe 3.x CLI. Quarantine and recovery need a Unix filesystem; extent sharing needs Linux and a filesystem with FIDEDUPERANGE (for example Btrfs or XFS).
+compatibility: Requires the rdedupe 3.x CLI. Scanning and plans work on Linux, macOS and other Unix systems; quarantine and recovery need Linux or macOS; extent sharing needs Linux and a filesystem with FIDEDUPERANGE (for example Btrfs or XFS).
 metadata:
   author: Vittorio Distefano (blackopsrepl)
   version: "3.0.0"

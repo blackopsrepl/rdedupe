@@ -7,7 +7,13 @@ use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
 /// Identifier of the sampling layout; part of every fingerprint and of the cache format.
-pub const LAYOUT: &str = "blake3-sample-layout-v1";
+pub const LAYOUT: &str = "xxh3-128-sample-layout-v1";
+
+/// Whether sampled digests resist deliberately crafted collisions. They do not (xxh3 is
+/// chosen for speed), so a sampled bucket that shows more than two equality classes is
+/// always refined with the collision-resistant full-content digest, whatever the file
+/// size; otherwise crafted collisions could force one comparison per class.
+pub const SAMPLES_COLLISION_RESISTANT: bool = false;
 
 /// Computes candidate-partitioning digests. Digests only ever *separate* candidates; equal
 /// digests are always followed by a complete byte comparison. Both methods must fail with
@@ -40,13 +46,13 @@ pub trait Fingerprinter: Sync {
 /// configured buffer size (a cache written under one `--buffer-kib` stays valid under any).
 pub const WINDOW: u64 = 64 * 1024;
 
-/// BLAKE3 over the size and up to three [`WINDOW`]-byte windows (start, middle, end), read
-/// through the caller's buffer in chunks. Files no larger than one window are read exactly
-/// once.
+/// xxh3-128 over the layout, the size and up to three [`WINDOW`]-byte windows (start,
+/// middle, end), read through the caller's buffer in chunks. Files no larger than one
+/// window are read exactly once. Refinement ([`full_digest`]) uses BLAKE3.
 #[derive(Default)]
-pub struct Blake3Fingerprinter;
+pub struct SampleFingerprinter;
 
-impl Fingerprinter for Blake3Fingerprinter {
+impl Fingerprinter for SampleFingerprinter {
     fn fingerprint(
         &self,
         path: &Path,
@@ -55,7 +61,7 @@ impl Fingerprinter for Blake3Fingerprinter {
         cancel: &Cancellation,
     ) -> Result<([u8; 32], u64)> {
         let (mut file, before) = open_expected(path, expected)?;
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
         hasher.update(LAYOUT.as_bytes());
         hasher.update(&before.size.to_le_bytes());
         let mut read_bytes = 0;
@@ -87,11 +93,13 @@ impl Fingerprinter for Blake3Fingerprinter {
             }
         }
         ensure_stable(path, &before, &file)?;
-        Ok((*hasher.finalize().as_bytes(), read_bytes))
+        let mut digest = [0u8; 32];
+        digest[..16].copy_from_slice(&hasher.digest128().to_le_bytes());
+        Ok((digest, read_bytes))
     }
 }
 
-/// BLAKE3 of the complete content, streamed through `buffer`.
+/// BLAKE3 (collision resistant) of the complete content, streamed through `buffer`.
 pub fn full_digest(
     path: &Path,
     expected: &Observation,

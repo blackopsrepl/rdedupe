@@ -23,19 +23,22 @@ UTF-8; `\u{XXXX}` for C1 controls and invisible or bidirectional formatting char
 
 ## Scan output: `rdedupe-machine-v1`
 
-`summary`, then `member*` (by group, then path), then `unresolved*` (by path), then
-`end`. Field lists are in `skills/rdedupe/references/commands.md`. `end` repeats the
+`summary`, then `member*` (by group, then path), each member immediately followed by its
+`alias*` records (other hard-linked paths to the same file, by path), then
+`unresolved*` (by path), then `end`. Field lists are in `skills/rdedupe/references/commands.md`. `end` repeats the
 group and unresolved counts; a stream without it is truncated.
 
 ## CSV
 
-Header: `group,path_encoding,path_hex,path_display,size,allocated,device,inode,links,keeper,protected,reason`.
-Standard RFC 4180 quoting. `path_hex` is lossless; `path_display` is for people.
+Header: `group,path_encoding,path_hex,path_display,size,allocated,device,inode,links,keeper,protected,reason,alias_of_hex`.
+Standard RFC 4180 quoting. `path_hex` is lossless; `path_display` is for people. One row
+per group member, each followed by one row per hard-link alias of it; an alias row has
+`keeper` false and `alias_of_hex` set to its member's `path_hex` (empty on member rows).
 
 ## NUL list
 
-Raw native paths of eligible copies (never keepers or protected members), each followed
-by one NUL byte.
+Raw native paths of eligible copies (never keepers, retained members or hard-link
+aliases), each followed by one NUL byte: exactly the targets a plan would contain.
 
 ## Plans: `rdedupe-plan-v1`
 
@@ -105,10 +108,24 @@ append+fsync `applied`; append+fsync `committed`. An extent action appends+fsync
 
 - **Process crash** (`kill -9`, panic, OOM kill): tested. `tests/recovery.rs` kills a
   child process after every durable record of apply (quarantine and extent), restore,
-  purge and resume, and checks file contents after recovery; it also makes a journal
-  write fail part-way (file-size limit) and checks that the run stops before the next
-  mutation. The guarantees hold on any filesystem, because a crash loses no data the
-  kernel accepted.
+  purge and resume, and checks file contents after recovery. The guarantees hold on any
+  filesystem, because a crash loses no data the kernel accepted.
+- **Write and sync failures** (disk full, quota, I/O error): tested where a real failure
+  can be produced without a dedicated filesystem.
+  - **Journal write failures:** a file-size limit (`RLIMIT_FSIZE`) makes journal writes
+    fail with a real `EFBIG`, the same failed-`write` path as `ENOSPC`. This is tested
+    part-way through `apply` (the run stops before its next mutation and `restore`
+    returns everything) and on the first append of `restore` and `purge`, after the
+    filesystem step it records has happened (running the command again finishes it,
+    with nothing lost or duplicated).
+  - **Quarantine-directory creation:** creation fails for real (`EACCES`) mid-run; the
+    action is skipped with nothing changed, and earlier actions stay restorable.
+  - **Scratch space:** exhausting it fails the scan explicitly
+    (`tests/resources.rs`).
+  - **fsync failures:** an `fsync` that returns an error is treated like a failed write,
+    since every sync result is propagated. It cannot be provoked without a faulty
+    device, so the tests inject a failure immediately after a successful sync instead,
+    which is the latest point at which a sync error could surface.
 - **Power loss or kernel crash**: argued from the ordering above, not tested. It holds
   where `fsync` of a file and of its directory makes the file's content and the
   directory's entries durable and a rename is atomic in the persisted state: ext4 (any
@@ -127,7 +144,7 @@ is corruption and every command refuses the journal.
 ## Fingerprint cache: `rdedupe-cache-v2`
 
 Header `{schema, layout, authority}` where `layout` is the fingerprint layout
-(`blake3-sample-layout-v1`); then one entry per path: `path`, `device`, `inode`, `size`,
+(`xxh3-128-sample-layout-v1`); then one entry per path: `path`, `device`, `inode`, `size`,
 `modified_ns`, `changed_ns`, `digest`. Written to a temporary sibling
 `<cache>.tmp-<pid>-<nanos>`, synced, and published only into an absent path (hard link,
 never replacing) or over a single-link file that still carries an rdedupe cache header

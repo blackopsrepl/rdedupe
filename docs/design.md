@@ -48,15 +48,19 @@ discover → size classes → fingerprints → exact comparison → groups → a
 - **Size elimination** (`src/store.rs`, `src/candidates.rs`): objects whose size is unique
   are never opened. Empty files are grouped like any other size, but the policy retains
   every empty non-keeper unless `--include-empty` is given, so plans never act on them.
-- **Fingerprints** (`src/fingerprint.rs`): BLAKE3 over the layout name, the size and three
-  fixed 64 KiB windows (start, middle, end), read in buffer-sized chunks; small files are
-  read once. Readers run in a bounded pool (`src/scheduler.rs`); each leases one buffer
-  from the scan's buffer pool (allocated once, `readers + 1` buffers) for a page of work.
-  *Incremental continuation:* when the windows cover every byte (files up to two
-  windows), the sampled digest already is a full-content digest, so refinement is skipped
-  and the file is never read again for hashing. For larger files the windows are
-  non-contiguous, so no prefix of a full-content hash exists to continue from; refinement
-  streams the whole file once.
+- **Fingerprints** (`src/fingerprint.rs`): xxh3-128 over the layout name, the size and
+  three fixed 64 KiB windows (start, middle, end), read in buffer-sized chunks; small
+  files are read once. Readers run in a bounded pool (`src/scheduler.rs`); each leases one
+  buffer from the scan's buffer pool (allocated once, `readers + 1` buffers) for a page of
+  work. *Hash choice:* sampled digests only separate candidates, and hashing them was about
+  half of all CPU samples with BLAKE3. xxh3 runs about four times faster (measured in
+  [benchmarks](benchmarks.md#hash-choice)) and halved the user-space instructions of
+  fingerprint-heavy scans. xxh3 is not collision resistant, so it is never trusted to keep
+  work bounded: see refinement below. *Incremental continuation:* files up to two windows
+  are read whole by their samples; a sampled bucket of them with at most two equality
+  classes is decided by comparison alone and never read again for hashing. For larger files
+  the windows are non-contiguous, so no prefix of a full-content hash exists to continue
+  from; refinement streams the whole file once.
 - **Exact comparison** (`src/compare.rs`, `src/candidates.rs`): inside each bucket, members
   are compared with one representative of every equality class found so far, so a bucket
   holding several distinct contents (a collision) still yields separate, exact groups. One
@@ -66,11 +70,14 @@ discover → size classes → fingerprints → exact comparison → groups → a
   Fingerprint readers are idle during comparison, so the batch reuses their descriptors and
   leases its buffers from the same pool, splitting each buffer into two halves (one per
   open file): `readers + 2` open files fit in `readers + 1` buffers.
-- **Refinement**: a sampled bucket of files larger than two windows that shows more than
-  two equality classes means the samples are blind to the differences. Its comparison
-  stops, every member's complete content is hashed (streamed BLAKE3), and comparison
-  restarts inside the full-content buckets, so N files that agree on every sampled window
-  but differ elsewhere cost N extra reads, never one comparison per class. Every open
+- **Refinement**: a sampled bucket that shows more than two equality classes means the
+  samples are blind to the differences (files larger than two windows) or the sample
+  digests collided (possible with xxh3, including by crafting files). Its comparison
+  stops, every member's complete content is hashed with BLAKE3 (collision resistant, so
+  crafted inputs cannot keep distinct files together past this step), and comparison
+  restarts inside the full-content buckets. N files that agree on every sampled window but
+  differ elsewhere, or that were crafted to collide in xxh3, cost N extra reads, never one
+  comparison per class (`tests/exactness.rs` checks both). Every open
   for fingerprinting, refinement and comparison checks the object against its inventory
   observation (identity, size, mtime, ctime); an object that changed after discovery is
   unresolved and makes the scan partial, never "unique".
@@ -153,6 +160,34 @@ cancelled scan exits 130 with a `cancelled` summary holding the groups establish
 (still exact) and refuses to plan; the existing cache is left untouched. A cancelled
 `apply` stops before its next action; every started action is journaled, and
 `apply --resume` continues it. `tests/cli.rs` sends a real SIGINT mid-comparison.
+
+## Dependencies
+
+Each runtime dependency replaces code that would otherwise be written and audited here:
+
+- `rusqlite` with bundled SQLite: the disk-backed inventory. It provides paged B-tree
+  indexes, keyset cursors, a page cache whose size is a budget, and `max_page_count` as
+  a scratch-size limit, which is exactly the external-memory sorting and grouping the
+  engine needs. It is bundled so the static release binary has no system library
+  dependency, and so the version is fixed by `Cargo.lock` rather than by the host.
+- `blake3`: collision-resistant full-content digests for refinement, plan checksums and
+  the keyed seals on plans and journals (its keyed mode is a MAC, so no separate HMAC
+  dependency is needed).
+- `xxhash-rust` (xxh3 only): fast sampled fingerprints (see Pipeline).
+- `walkdir`: directory traversal with a bounded number of open handles and no symlink
+  following.
+- `clap`: argument parsing and the `--help` text that the skill tests compare against.
+- `serde`/`serde_json`, `csv`, `hex`: the machine formats (JSON Lines, RFC 4180 CSV,
+  lossless hex paths).
+- `libc`: the system calls the standard library does not expose (`renameat2`,
+  `renameatx_np`, `fstatat`, `unlinkat`, `FIDEDUPERANGE`, `flock`, `setrlimit`,
+  `listxattr`, `F_FULLFSYNC`).
+- `ctrlc`: one SIGINT handler that sets the cancellation flag.
+- `thiserror`: error type derivation.
+
+Nothing pulls in an async runtime or a thread pool; parallelism is scoped threads under
+the reader budget. Development-only dependencies (`assert_cmd`, `predicates`,
+`tempfile`, `rand`) never ship.
 
 ## Platforms
 

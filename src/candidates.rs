@@ -163,8 +163,8 @@ fn refine_flagged(store: &Store, options: &Options<'_>, metrics: &mut Metrics) -
 /// Outcome of classifying one bucket.
 enum Bucket {
     Classified,
-    /// More than [`CLASS_LIMIT`] classes in a sampled bucket whose samples leave bytes
-    /// unread: refine it instead.
+    /// More than [`CLASS_LIMIT`] classes in a sampled bucket: refine it with full-content
+    /// digests instead.
     TooManyClasses,
 }
 
@@ -204,9 +204,14 @@ fn classify_bucket(
     let Some(last) = first.last() else {
         return Ok(Bucket::Classified);
     };
-    // Samples cover every byte up to two windows; beyond that, many classes in one sampled
-    // bucket mean the samples are blind to the differences.
-    let limited = phase == SAMPLED && last.observation.size > 2 * crate::fingerprint::WINDOW;
+    // Many classes in one sampled bucket mean the samples are blind to the differences
+    // (files larger than two windows) or the sample digest collided. Sample digests are
+    // not collision resistant, so such buckets are refined with the full-content BLAKE3
+    // digest at any size: crafted collisions then cost one extra read per file, never one
+    // comparison per class.
+    let limited = phase == SAMPLED
+        && (!crate::fingerprint::SAMPLES_COLLISION_RESISTANT
+            || last.observation.size > 2 * crate::fingerprint::WINDOW);
     if (first.len() as u64) < store.page_rows() {
         return classify_in_memory(store, options, metrics, &first, limited);
     }

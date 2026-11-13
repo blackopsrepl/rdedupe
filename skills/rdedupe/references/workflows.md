@@ -151,7 +151,9 @@ A plan can be reviewed and applied later; `apply` re-validates everything.
 - Run: `rdedupe scan ROOT --format jsonl > partial.jsonl; echo "exit=$?"`
 - Exit 2: unreadable files or directories produced `unresolved` records. Report each
   path with its `operation` and `message`. Ask the user whether to fix permissions,
-  exclude the path (scan narrower roots or use `--pattern`), or stop. Never chmod or chown
+  leave the path out, or stop. There is no exclusion flag: leave a path out by scanning
+  narrower roots that do not contain it, or by choosing a `--pattern` (a substring every
+  scanned path must contain) that only the wanted paths match. Never chmod or chown
   on your own initiative.
 - Stop: `plan` on a partial scan exits 4 and prints the human report; there is no flag
   to override this.

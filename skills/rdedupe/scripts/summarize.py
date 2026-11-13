@@ -42,7 +42,10 @@ def scan(records):
                 "size": record["size"],
                 "links": record["links"],
                 "reason": record["reason"],
+                "aliases": [],
             })
+        elif record.get("record") == "alias":
+            groups[record["group"]][-1]["aliases"].append(decode(record["path"])["path"])
     unresolved = [
         {**decode(r["path"]), "operation": r["operation"], "message": r["message"]}
         for r in records if r.get("record") == "unresolved"

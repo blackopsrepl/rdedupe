@@ -3,7 +3,7 @@ use crate::cache;
 use crate::candidates;
 use crate::config::ScanConfig;
 use crate::error::{Error, Result};
-use crate::fingerprint::{Blake3Fingerprinter, Fingerprinter};
+use crate::fingerprint::{Fingerprinter, SampleFingerprinter};
 use crate::fs::{canonical_roots, discover, DiscoveryOptions};
 use crate::model::{Completeness, Exactness, ScanSummary};
 use crate::policy::Policy;
@@ -35,7 +35,7 @@ pub fn resolve_owned(path: &std::path::Path) -> Result<std::path::PathBuf> {
 }
 
 pub fn scan(config: ScanConfig, policy: Policy, cancel: &Cancellation) -> Result<ScanResult> {
-    scan_with(config, policy, cancel, &Blake3Fingerprinter)
+    scan_with(config, policy, cancel, &SampleFingerprinter)
 }
 
 /// Runs discovery → size elimination → fingerprints → exact comparison → accounting.

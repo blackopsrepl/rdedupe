@@ -32,8 +32,8 @@
 ## CSV
 
 2.x columns (`file_path,file_name,extension,size_bytes,size_mb,md5_hash,group_count,is_duplicate`, one row per file, timestamps included) are replaced by
-`group,path_encoding,path_hex,path_display,size,allocated,device,inode,links,keeper,protected,reason`,
-one row per member of a duplicate group. Paths are lossless hex plus an escaped display
+`group,path_encoding,path_hex,path_display,size,allocated,device,inode,links,keeper,protected,reason,alias_of_hex`,
+one row per member of a duplicate group, plus one row per hard-link alias of a member. Paths are lossless hex plus an escaped display
 column. There is no hash column: groups are defined by comparison, not by a digest.
 
 ## Space accounting
