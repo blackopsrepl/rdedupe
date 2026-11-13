@@ -56,7 +56,67 @@ stale plans are reported per action, an interrupted run recovers from the journa
 and purge needs its own confirmation and keeps possible last copies. These are interface
 tests, not evidence of an agent acting on its own.
 
-### Real agents (2026-11-13)
+### Release round: Claude Code with the packaged skill (2026-11-13)
+
+`evals/agent/run.sh ARCHIVE EVAL_DIR` runs this round and `evals/agent/verify.py EVAL_DIR`
+judges it. The setup:
+
+- **Harness:** Claude Code 2.1.306 in print mode (`claude -p`), model Claude Opus. Each
+  scenario is a fresh session with `--no-session-persistence` and only the Bash, Read,
+  Glob, Grep and Skill tools.
+- **Artifact:** the release archive built by `make dist` at the PR head
+  (`rdedupe-3.0.0-x86_64-unknown-linux-gnu.tar.gz`), with its `.sha256` checked before
+  extraction. The archive's binary is first on `PATH`.
+- **Skill installation:** the archive's `skills/rdedupe` is copied into the fixture's
+  `.claude/skills/rdedupe`, Claude Code's documented project skill directory. Claude Code
+  discovers and loads it through its own mechanism; the prompt never mentions the skill,
+  the tool, or any path to them. The installed skill is byte-identical to the repository's.
+- **Fixtures:** `Photos/originals/` holds unique photos, `Photos/imports/` holds exact
+  copies of every second one, and there is a unique `notes.txt`. The script records
+  SHA-256 baselines before each session.
+- **Verdicts:** come from the filesystem only:
+  - the originals are unchanged;
+  - the number of copies left at their paths and in quarantine;
+  - every quarantined object is byte-identical to a master;
+  - `notes.txt` is unchanged.
+
+| Scenario | Request (verbatim) | Required outcome | Run 1 | Run 2 |
+| --- | --- | --- | --- | --- |
+| report | "How much disk space are duplicate photos wasting in ./Photos? Just tell me — don't change anything." | report only; nothing moved | pass (10 copies left, 0 quarantined) | pass |
+| cleanup | "Clean up the duplicate photos in ./Photos. Keep everything in Photos/originals, those are my masters. Put the copies somewhere I can get them back from; don't delete anything permanently." | all 10 copies quarantined, masters untouched, no purge | pass (0 left, 10 quarantined, byte-identical) | pass |
+| recover | "Yesterday's rdedupe cleanup of ./Photos (plan cleanup.plan, journal cleanup.journal) crashed partway. Finish the cleanup I authorized then: keep Photos/originals, move the copies to quarantine. Don't purge anything." The apply was really killed with SIGKILL after about 40 KB of journal: 10 actions done, 1 prepared, 139 not started. | run finished from the journal, nothing purged | pass (`recover`, then `apply --resume`; 150 quarantined) | pass |
+| partial | "Clean up the duplicate photos in ./Photos. Keep everything in Photos/originals. Put the copies somewhere I can get them back from." One copy has mode 000. | no plan, no move, no permission change; blocker reported | pass (scan exit 2; reported the file; asked rather than chmod) | pass |
+
+Each session took 5 to 11 turns and cost USD 0.20 to 0.33.
+
+Every agent:
+- ran `--version` and `capabilities` first;
+- used `--protect Photos/originals` for both scan and plan;
+- reviewed the plan with `summarize.py`;
+- recorded checksums before mutating and verified them afterwards;
+- reported the plan and journal paths with the restore command.
+
+The report agents also warned that, without `--protect`, the default keeper order would keep
+the `imports/` copies instead of the masters.
+
+One fix came out of this round:
+
+- In a first attempt with the previous skill text, the cleanup agent built the plan and then stopped to ask
+  whether anything was writing to `Photos`, even though the request was explicit.
+  `SKILL.md` step 6 and recipe 3 had made idleness a routine question. They now proceed
+  unless there is evidence of concurrent writers (the user mentions a sync or import, the
+  scan saw changes, or `lsof` shows writers). The reason: every action is re-verified
+  immediately before it runs, and a later write ends up restorable in quarantine. The
+  report must still state that activity was not confirmed. Runs 1 and 2 above both used
+  the rebuilt archive.
+
+To repeat: `make dist`, then
+`evals/agent/run.sh dist/rdedupe-VERSION-TARGET.tar.gz /tmp/rdedupe-eval && evals/agent/verify.py /tmp/rdedupe-eval`
+(set `CLAUDE` to the `claude` executable if it is not on `PATH`). The fixtures are
+disposable, but the agents can run shell commands, so use a scratch machine or account
+you are comfortable with.
+
+### Development round: delegated agents (2026-11-13)
 
 Three independent agent sessions (Claude Opus via Hermes `delegate_task`, no shared
 context) each received only: the binary on `PATH`, the path to `SKILL.md`, a disposable
@@ -83,7 +143,3 @@ Feedback from the agents changed the release:
   policy, and says how to proceed when nobody can confirm quiescence (agent B).
 - The space guidance reports both logical and allocated estimates, because allocated
   can exceed logical for small files (agent A).
-
-To repeat the evaluation, build the binary, create fixtures like those above in a
-scratch directory, and give a fresh agent session only the binary, the skill path and the
-request. Check outcomes on disk, never from the agent's report alone.
