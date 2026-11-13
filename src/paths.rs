@@ -72,6 +72,13 @@ pub fn display_text(text: &str) -> String {
 }
 
 fn escape_for_terminal(bytes: &[u8], escape_backslash: bool) -> String {
+    // Most names and messages are printable ASCII with nothing to escape.
+    if bytes
+        .iter()
+        .all(|&b| (0x20..0x7f).contains(&b) && !(escape_backslash && b == b'\\'))
+    {
+        return String::from_utf8(bytes.to_vec()).expect("printable ASCII");
+    }
     let mut out = String::new();
     for chunk in bytes.utf8_chunks() {
         for ch in chunk.valid().chars() {

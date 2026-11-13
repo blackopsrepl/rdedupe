@@ -370,3 +370,16 @@ fn control_bytes_in_unreadable_directory_names_are_escaped_in_messages() {
         "forged line: {text}"
     );
 }
+
+#[test]
+fn display_escaping_fast_and_slow_paths_agree() {
+    use rdedupe::paths::{display_path, display_text};
+    use std::os::unix::ffi::OsStrExt;
+    let path = |b: &[u8]| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b));
+    assert_eq!(display_path(&path(b"plain/name.txt")), "plain/name.txt");
+    assert_eq!(display_path(&path(b"a\\b")), "a\\\\b");
+    assert_eq!(display_text("a\\b"), "a\\b");
+    assert_eq!(display_path(&path(b"x\x1by\nz\x7f")), "x\\x1by\\nz\\x7f");
+    assert_eq!(display_text("x\x1by\nz\u{202e}"), "x\\x1by\\nz\\u{202e}");
+    assert_eq!(display_path(&path(b"caf\xc3\xa9 \xff")), "caf\u{e9} \\xff");
+}
