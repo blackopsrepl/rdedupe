@@ -1,0 +1,189 @@
+# rdedupe 3.x command reference
+
+Verify the installed version first: `rdedupe --version` prints `rdedupe 3.x.y`, and
+`rdedupe capabilities` prints `key=value` lines: `platform`, `plan-schema`,
+`journal-schema`, `machine-schema`, `fingerprint-layout`, `path-encoding`, `quarantine`
+(`same-filesystem rename-noreplace` or `unsupported`) and `extent`
+(`FIDEDUPERANGE (filesystem-dependent)` on Linux, otherwise `unsupported`; whether a given
+filesystem supports it is only known when an extent action runs).
+`rdedupe COMMAND --help` is the live source of truth; this file lists every flag it shows.
+
+## Commands and flags
+
+### `rdedupe scan ROOT...`
+
+Reports exact duplicate groups. Never modifies the scanned tree.
+
+| Flag | Meaning |
+| --- | --- |
+| `--format human\|csv\|jsonl\|nul` | Output format (default `human`). Use `jsonl` for automation. |
+| `--output FILE` | Write the report to a new file; refuses existing paths, including symlinks and hard links to scanned files. |
+| `--pattern TEXT` | Only inventory paths whose full path contains this byte substring. |
+| `--protect DIR` | Never make members under DIR action targets (repeatable). Matches whole path components: `/data/keep` does not cover `/data/keeper`. |
+| `--prefer DIR` | Prefer keepers under DIR; earlier occurrences win (repeatable). |
+| `--prefer-newest` | Prefer the most recently modified member before native path order. |
+| `--one-file-system` | Do not cross into other filesystems below each root. |
+| `--cache FILE` | Fingerprint cache to refresh after the scan. Never consulted unless `--trust-cache`. |
+| `--trust-cache` | Reuse cached fingerprints whose validators match. Makes the scan heuristic; plans refuse it. |
+| `--fresh` | Ignore existing cache contents (the cache is still rewritten). |
+| `--progress` | Stage progress on stderr. |
+| `--memory-mib N` | Working-set budget: SQLite page cache + read buffers + 4 MiB allowance (default 64). |
+| `--buffer-kib N` | Size of each read buffer, 4 to 8192 (default 256). |
+| `--readers N` | Concurrent fingerprint readers, 1 to 64 (default 2). |
+| `--descriptors N` | Maximum open file descriptors; must be at least 13 + readers (default 32). |
+| `--temp-mib N` | Maximum scratch database size, at least 16 (default 8192). Exceeding it fails the scan with "database or disk is full". |
+| `--scratch-dir DIR` | Where the private scratch workspace is created (default: the system temporary directory). It is removed on exit. |
+
+### `rdedupe plan ROOT... --output PLAN`
+
+Scans like `scan` (same selection, policy, cache and budget flags, including
+`--progress`) and saves a plan. Refuses partial, cancelled and heuristic scans and
+never overwrites an existing file. On a partial scan it prints the human report to
+stderr, writes no plan, and exits 4.
+
+| Flag | Meaning |
+| --- | --- |
+| `--output FILE` | New plan file. |
+| `--action quarantine\|extent` | `quarantine` (default) moves copies into a recoverable quarantine; `extent` shares their storage with the keeper (Linux, FIDEDUPERANGE). |
+
+### `rdedupe apply --plan PLAN --journal JOURNAL`
+
+Verifies the plan, then for each action re-checks current facts (same paths, same
+identities and metadata as planned, keeper and target distinct, bytes identical now),
+journals the intent durably, and acts. Refused actions change nothing.
+
+| Flag | Meaning |
+| --- | --- |
+| `--plan FILE` | Plan from `rdedupe plan`. |
+| `--journal FILE` | New journal; must not exist. Keep it. |
+| `--force` | Skip the confirmation prompt (required when stdin is not a terminal). Validation still runs. |
+| `--buffer-kib N` | Buffer for the pre-action byte comparison (default 256). |
+| `--format human\|jsonl` | Result format. |
+
+### `rdedupe restore --journal JOURNAL`
+
+Moves quarantined objects back. Never replaces an entry that now exists at an original
+path. Idempotent.
+
+| Flag | Meaning |
+| --- | --- |
+| `--journal FILE` | Journal written by `apply`. |
+| `--format human\|jsonl` | Result format. |
+
+### `rdedupe purge --journal JOURNAL`
+
+Permanently removes quarantined objects. Each removal requires the keeper to still exist,
+to be a different object, and to be byte-identical to the quarantined copy; otherwise
+that copy is kept. Idempotent.
+
+| Flag | Meaning |
+| --- | --- |
+| `--journal FILE` | Journal written by `apply`. |
+| `--force` | Skip the confirmation prompt. Keeper verification still runs. |
+| `--buffer-kib N` | Buffer for the keeper comparison (default 256). |
+| `--format human\|jsonl` | Result format. |
+
+### `rdedupe recover --journal JOURNAL`
+
+Read-only. For each action, prints its last recorded state and where its object is now.
+
+| Flag | Meaning |
+| --- | --- |
+| `--journal FILE` | Journal written by `apply`. |
+| `--format human\|jsonl` | Result format. |
+
+### `rdedupe capabilities`
+
+Prints the version, platform and supported formats. No flags.
+
+### Legacy form (2.x compatibility)
+
+| Flag | Meaning |
+| --- | --- |
+| `rdedupe [DIR]...` | Same as `scan` with human output (default directory `.`). |
+| `--pattern TEXT` | As in `scan`. |
+| `--csv FILE` | Also write the CSV report to a new file. |
+| `--delete` | No longer deletes: exits 4 with the plan/apply migration message. |
+| `--dry-run` | With `--delete`: report only, exit 0. |
+| `--force` | Accepted with `--delete`; deletion still refuses. |
+
+## Streams and exit codes
+
+stdout carries results only. stderr carries diagnostics, prompts and `--progress`.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Complete: scan complete, every action succeeded, recovery clean. |
+| 2 | Partial: unresolved paths, skipped or failed actions, restore or purge conflicts, indeterminate journal states. Results printed are still correct. |
+| 3 | Confirmation declined (or stdin was not a terminal and `--force` was absent). Nothing changed. |
+| 4 | Error: invalid budget, unreadable root, plan rejected, journal locked or corrupt, refused output path. |
+| 64 | Invalid invocation (unknown flag, missing argument). |
+| 130 | Cancelled by SIGINT. A cancelled scan prints a `cancelled` summary. |
+| 141 | stdout closed early (for example piped into `head`). |
+
+## Paths
+
+Machine output carries every path as `{"encoding":"unix-bytes","data":"<hex>"}`: the
+hex of the exact native bytes, so names with newlines, invalid UTF-8 or control bytes
+round-trip. Decode with `bytes.fromhex(data)` (Python) or `hex::decode`. Human and CSV
+`path_display` columns escape control bytes (`\n`, `\xff`, `\x1b`) and are for reading
+only; never pass a display string back to a command. `--format nul` emits raw native
+paths of eligible copies, each followed by a NUL byte, for `xargs -0`.
+
+## Machine records (`rdedupe-machine-v1`)
+
+Every line is one JSON object with a `record` field. Identify records by that field,
+never by key order or line position within a kind.
+
+`scan --format jsonl`, in order:
+
+- `summary` (first): `schema`, `binary_version`, `completeness` (`complete`/`partial`/`cancelled`/`failed`), `exactness` (`exact`/`heuristic`), `unresolved` (count), `cache_provenance`, and `metrics` (`sqlite_page_cache_bytes` is the page-cache cap derived
+from the budget, not memory actually used): `paths`, `objects`, `aliases`, `symlinks_skipped`, `special_files_skipped`, `candidate_objects`, `eliminated_by_size`, `eliminated_by_fingerprint`, `fingerprint_bytes_read`, `comparison_bytes_read`, `cached_fingerprints_reused`, `groups`, `participants`, `eligible_copies`, `logical_redundant_bytes`, `estimated_allocated_bytes`, `sqlite_page_cache_bytes`.
+- `member` (one per group member, ordered by group then path): `group`, `path`, `identity` (`device`, `inode`), `size`, `allocated`, `links`, `is_keeper`, `protected`, `reason`.
+- `unresolved`: `path`, `operation` (`traverse`, `metadata`, `fingerprint`, `compare`), `message`, `retry_safe`.
+- `end` (last): `schema`, `groups`, `unresolved`. A stream without `end` was cut short.
+
+`apply --format jsonl`: one `outcome` per action (`group`, `target`, `kind`, `status`,
+`logical_bytes`, `message`), then `apply_summary` (`actions`, `quarantined`, `shared`,
+`skipped`, `failed`, `logical_bytes_moved_or_shared`). Statuses: `quarantined`, `shared`,
+`skipped_stale` (current facts no longer match the plan; nothing changed),
+`skipped_group` (an earlier action in the group was refused), `failed` (the mutation
+started and stopped; see the journal).
+
+`restore`/`purge --format jsonl`: one `finding` per action (`action`, `target`,
+`location`, `result`), then `restore_summary` or `purge_summary` (`actions`, `restored`,
+`purged`, `already_in_place`, `not_quarantined`, `missing`, `conflicts`,
+`truncated_tail_dropped`).
+
+`recover --format jsonl`: one `inspection` per action and state run (`action`, `group`,
+`kind`, `last_state`, `bytes_completed`, `target`, `location`, `assessment`).
+
+Locations: `in_place`, `in_quarantine`, `in_quarantine_original_occupied`, `both_names`,
+`quarantine_altered`, `replaced`, `absent`. Journal states: `prepared`, `applied`,
+`committed`, `failed`, `restored`, `purged`.
+
+## Quarantine layout
+
+Each target moves to `<its directory>/.rdedupe-quarantine/<journal id>/<sequence>-<hex>`,
+where `<hex>` is the hex of the original name, truncated to 160 characters (so a long
+name may lose its extension there). Restore and purge locate objects through the
+journal, not by name. Emptied quarantine directories are removed by `restore` and
+`purge`; one that still holds objects of any journal keeps its marker.
+
+## Plans (`rdedupe-plan-v1`)
+
+JSONL. Line 1 is the header (`schema`, `binary_version`, `roots`, `protect`, `prefer`,
+`prefer_newest`, `completeness`, `exactness`, `action`). Then one action per line
+(`group`, `target`, `target_observation`, `keeper`, `keeper_observation`, `reason`).
+The last line is the footer (`schema: rdedupe-plan-footer-v1`, `actions`, `checksum`).
+The checksum detects corruption only; validation also rejects out-of-scope or relative
+paths, protected targets, duplicate targets, keepers that are also targets, unknown
+schemas or encodings, and partial or heuristic headers.
+
+## Budgets
+
+Defaults suit most machines. For very large trees or small machines use
+`--memory-mib 16 --buffer-kib 64 --readers 1 --descriptors 16`; the minimum accepted is
+`--memory-mib 8 --buffer-kib 4 --readers 1 --descriptors 14 --temp-mib 16`. The budget
+bounds the engine's working set; whole-process RSS adds the binary and allocator overhead
+(measured at about 12 MiB peak for a 16 MiB budget on 4,000 files).

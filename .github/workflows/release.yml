@@ -1,18 +1,27 @@
-name: Build binary release
-
-on: [push, pull_request]
-
+name: Release
+# Publishing is tag-driven: pushing a v3.x.y tag builds, tests and verifies the archive,
+# then attaches it to the GitHub release for that tag. Branch pushes never publish.
+on:
+  push:
+    tags: ['v3.*']
+permissions: { contents: write }
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "clippy, rustfmt", targets: x86_64-unknown-linux-musl }
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag matches the package version
+        run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+      - run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - run: make check
+      - run: make dist TARGET=x86_64-unknown-linux-musl
+      - name: Verify the exact archive that ships
+        run: make dist-check TARGET=x86_64-unknown-linux-musl
+      - uses: softprops/action-gh-release@v2
         with:
-          toolchain: stable
-          profile: minimal
-          components: clippy, rustfmt
-          override: true
-      - name: Run clippy
-        run: make build-release
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256

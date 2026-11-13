@@ -1,314 +1,109 @@
-// Integration tests for duplicate detection and deduplication
-mod test_utils;
+//! End-to-end pipeline: generate → scan → plan → apply → rescan → restore, with exact
+//! survivor assertions against the independent oracle.
 
-use rdedupe::{collect_file_info, create_dataframe, delete_duplicates, find, walk};
-use test_utils::*;
+mod support;
 
-/// Test: Generate files with 30% duplicates and verify detection accuracy
-#[test]
-fn test_duplicate_detection_30_percent() {
-    init_test_logger();
+use std::collections::BTreeSet;
+use support::*;
 
-    let config = TestFileConfig {
-        num_files: 100,
-        duplicate_coefficient: 0.3,
-        extension: "txt".to_string(),
-        min_size_bytes: 100,
-        max_size_bytes: 1024,
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Verify detection with 5% tolerance
-    let verification =
-        verify_duplicate_detection(&generated, &df, 5.0).expect("Verification failed");
-    verification.print_report();
-
-    assert!(
-        verification.passed,
-        "Duplicate detection accuracy outside tolerance: {:.2}% (expected within 5%)",
-        verification.accuracy_percent
-    );
+fn all_files(fixture: &Fixture) -> BTreeSet<(Vec<u8>, Vec<u8>)> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![fixture.root().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if dir.join("RDEDUPE-QUARANTINE").exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                out.insert((bytes(&path), std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out
 }
 
-/// Test: Generate files with 50% duplicates and verify detection accuracy
 #[test]
-fn test_duplicate_detection_50_percent() {
-    init_test_logger();
+fn full_pipeline_removes_exactly_the_eligible_copies_and_restores_them() {
+    for seed in [3u64, 11, 29] {
+        let fixture = Fixture::new();
+        seeded_tree(&fixture, seed, 150);
+        let before = all_files(&fixture);
+        let expected_groups = oracle(&[fixture.root()]);
+        // Expected survivors: every non-group file plus the smallest path of each group.
+        let removed: BTreeSet<Vec<u8>> = expected_groups
+            .iter()
+            .flat_map(|g| g.iter().skip(1).cloned())
+            .collect();
 
-    let config = TestFileConfig {
-        num_files: 100,
-        duplicate_coefficient: 0.5,
-        extension: "dat".to_string(),
-        min_size_bytes: 50,
-        max_size_bytes: 500,
-    };
+        let work = Fixture::new();
+        let plan = work.path("plan");
+        let journal = work.path("journal");
+        rdedupe()
+            .args(["plan", fixture.str(), "--output"])
+            .arg(&plan)
+            .assert()
+            .success();
+        let apply = rdedupe()
+            .args(["apply", "--force", "--format", "jsonl", "--plan"])
+            .arg(&plan)
+            .arg("--journal")
+            .arg(&journal)
+            .output()
+            .unwrap();
+        assert!(apply.status.success(), "seed {seed}");
+        let records = jsonl(&apply.stdout);
+        let summary = records.last().unwrap();
+        assert_eq!(summary["record"], "apply_summary");
+        assert_eq!(
+            summary["quarantined"].as_u64().unwrap() as usize,
+            removed.len()
+        );
 
-    let generated = generate_test_files(config).expect("Failed to generate test files");
+        let after = all_files(&fixture);
+        let survivors: BTreeSet<Vec<u8>> = after.iter().map(|(p, _)| p.clone()).collect();
+        let expected_survivors: BTreeSet<Vec<u8>> = before
+            .iter()
+            .map(|(p, _)| p.clone())
+            .filter(|p| !removed.contains(p))
+            .collect();
+        assert_eq!(survivors, expected_survivors, "seed {seed}");
+        // Every distinct content still exists exactly once more than zero times.
+        let contents_before: BTreeSet<&Vec<u8>> = before.iter().map(|(_, c)| c).collect();
+        let contents_after: BTreeSet<&Vec<u8>> = after.iter().map(|(_, c)| c).collect();
+        assert_eq!(contents_before, contents_after, "no content lost");
+        assert!(oracle(&[fixture.root()]).is_empty(), "no duplicates remain");
+        let rescan = scan_jsonl([fixture.root()]);
+        assert!(
+            machine_groups(&rescan).is_empty(),
+            "quarantine is not rescanned"
+        );
 
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Verify detection with 5% tolerance
-    let verification =
-        verify_duplicate_detection(&generated, &df, 5.0).expect("Verification failed");
-    verification.print_report();
-
-    assert!(
-        verification.passed,
-        "Duplicate detection accuracy outside tolerance: {:.2}% (expected within 5%)",
-        verification.accuracy_percent
-    );
+        rdedupe()
+            .args(["restore", "--journal"])
+            .arg(&journal)
+            .assert()
+            .success();
+        assert_eq!(all_files(&fixture), before, "seed {seed}: restore is exact");
+    }
 }
 
-/// Test: Generate files with 0% duplicates (all unique)
 #[test]
-fn test_no_duplicates() {
-    init_test_logger();
-
-    let config = TestFileConfig {
-        num_files: 50,
-        duplicate_coefficient: 0.0,
-        extension: "bin".to_string(),
-        min_size_bytes: 100,
-        max_size_bytes: 500,
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Verify no duplicates detected
-    let verification =
-        verify_duplicate_detection(&generated, &df, 5.0).expect("Verification failed");
-    verification.print_report();
-
-    assert_eq!(
-        verification.detected_duplicate_files, 0,
-        "Should detect 0 duplicates when coefficient is 0.0"
-    );
-    assert!(
-        verification.passed,
-        "Verification should pass with 0 duplicates"
-    );
-}
-
-/// Test: Full pipeline - generate, detect, deduplicate, verify
-#[test]
-fn test_full_deduplication_pipeline() {
-    init_test_logger();
-
-    let config = TestFileConfig {
-        num_files: 80,
-        duplicate_coefficient: 0.4,
-        extension: "test".to_string(),
-        min_size_bytes: 200,
-        max_size_bytes: 800,
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    println!("\n=== Step 1: Duplicate Detection ===");
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Verify detection
-    let detection_verification =
-        verify_duplicate_detection(&generated, &df, 5.0).expect("Detection verification failed");
-    detection_verification.print_report();
-
-    assert!(
-        detection_verification.passed,
-        "Duplicate detection should pass within tolerance"
-    );
-
-    println!("\n=== Step 2: Deduplication ===");
-    // Perform deduplication with force flag
-    let delete_result = delete_duplicates(&df, false, true).expect("Deduplication failed");
-
-    println!("\n=== Step 3: Deduplication Verification ===");
-    // Verify deduplication
-    let dedup_verification = verify_deduplication(&generated, &delete_result)
-        .expect("Deduplication verification failed");
-    dedup_verification.print_report();
-
-    assert!(
-        dedup_verification.all_duplicates_removed,
-        "All duplicates should be removed"
-    );
-    assert!(
-        dedup_verification.passed,
-        "Deduplication verification should pass"
-    );
-    assert_eq!(
-        dedup_verification.actual_files_remaining, dedup_verification.expected_files_remaining,
-        "Remaining files should match expected count"
-    );
-}
-
-/// Test: Dry run doesn't delete files
-#[test]
-fn test_dry_run_no_deletion() {
-    init_test_logger();
-
-    let config = TestFileConfig {
-        num_files: 50,
-        duplicate_coefficient: 0.3,
-        extension: "txt".to_string(),
-        ..Default::default()
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    let files_before = generated.all_files.len();
-
-    // Perform dry run
-    let delete_result = delete_duplicates(&df, true, true).expect("Dry run failed");
-
-    // Count files after dry run
-    let files_after = std::fs::read_dir(generated.path())
-        .expect("Failed to read directory")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map_or(false, |ext| ext == generated.extension().as_str())
-        })
-        .count();
-
-    assert!(delete_result.dry_run, "Should be marked as dry run");
-    assert_eq!(
-        files_after, files_before,
-        "Dry run should not delete any files"
-    );
-}
-
-/// Test: Large dataset with high duplicate ratio
-#[test]
-fn test_large_dataset_high_duplicates() {
-    init_test_logger();
-
-    let config = TestFileConfig {
-        num_files: 200,
-        duplicate_coefficient: 0.7,
-        extension: "data".to_string(),
-        min_size_bytes: 100,
-        max_size_bytes: 2048,
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Verify detection with 5% tolerance
-    let verification =
-        verify_duplicate_detection(&generated, &df, 5.0).expect("Verification failed");
-    verification.print_report();
-
-    assert!(
-        verification.passed,
-        "Large dataset detection accuracy outside tolerance"
-    );
-
-    // Perform deduplication
-    let delete_result = delete_duplicates(&df, false, true).expect("Deduplication failed");
-
-    // Verify deduplication
-    let dedup_verification = verify_deduplication(&generated, &delete_result)
-        .expect("Deduplication verification failed");
-    dedup_verification.print_report();
-
-    assert!(
-        dedup_verification.passed,
-        "Large dataset deduplication should pass"
-    );
-}
-
-/// Test: Small dataset with low duplicate ratio
-#[test]
-fn test_small_dataset_low_duplicates() {
-    init_test_logger();
-
-    let config = TestFileConfig {
-        num_files: 20,
-        duplicate_coefficient: 0.1,
-        extension: "small".to_string(),
-        min_size_bytes: 50,
-        max_size_bytes: 200,
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Verify detection
-    let verification =
-        verify_duplicate_detection(&generated, &df, 10.0).expect("Verification failed");
-    verification.print_report();
-
-    // With small datasets and low duplicates, allow higher tolerance
-    assert!(
-        verification.passed,
-        "Small dataset detection should pass with appropriate tolerance"
-    );
-}
-
-/// Test: Verify one file kept per duplicate group
-#[test]
-fn test_one_file_kept_per_group() {
-    init_test_logger();
-
-    let config = TestFileConfig {
-        num_files: 60,
-        duplicate_coefficient: 0.4,
-        extension: "grp".to_string(),
-        ..Default::default()
-    };
-
-    let generated = generate_test_files(config).expect("Failed to generate test files");
-
-    // Run duplicate detection
-    let files = walk(generated.path().to_str().unwrap()).expect("Failed to walk directory");
-    let files = find(files, &generated.pattern());
-    let file_infos = collect_file_info(files).expect("Failed to collect file info");
-    let df = create_dataframe(file_infos).expect("Failed to create dataframe");
-
-    // Perform deduplication
-    let delete_result = delete_duplicates(&df, false, true).expect("Deduplication failed");
-
-    // Verify exactly one file is kept per duplicate group
-    assert_eq!(
-        delete_result.kept_files.len(),
-        generated.duplicate_groups_count(),
-        "Should keep exactly one file per duplicate group"
-    );
+fn dry_run_and_scan_never_mutate() {
+    let fixture = Fixture::new();
+    seeded_tree(&fixture, 1, 60);
+    let before = all_files(&fixture);
+    rdedupe()
+        .arg(fixture.root())
+        .args(["--delete", "--dry-run"])
+        .assert()
+        .success();
+    rdedupe()
+        .args(["scan", fixture.str(), "--format", "nul"])
+        .assert()
+        .success();
+    assert_eq!(all_files(&fixture), before);
 }

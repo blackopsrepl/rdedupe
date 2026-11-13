@@ -1,171 +1,123 @@
-# rdedupe - duplicate file finder and remover
-# ISC License
-
 BINARY := rdedupe
-VERSION := $(shell grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+HOST := $(shell rustc -vV | sed -n 's/^host: //p')
+CARGO ?= cargo
+CARGO_TARGET_DIR ?= target
 PREFIX ?= $(HOME)/.cargo
 BINDIR := $(PREFIX)/bin
+DIST_DIR ?= dist
+# Build target for release/dist; empty means the host. Static Linux binaries use musl:
+#   make dist TARGET=x86_64-unknown-linux-musl   (needs musl-gcc, e.g. the musl-tools package)
+TARGET ?=
+TARGET_FLAG := $(if $(TARGET),--target $(TARGET),)
+RELEASE_DIR := $(CARGO_TARGET_DIR)/$(if $(TARGET),$(TARGET)/,)release
+PACKAGE := rdedupe-$(VERSION)-$(if $(TARGET),$(TARGET),$(HOST))
+export CC_x86_64_unknown_linux_musl ?= musl-gcc
+export CC_aarch64_unknown_linux_musl ?= aarch64-linux-musl-gcc
 
-CARGO := cargo
-INSTALL := install
-RM := rm -f
+.PHONY: all build release format format-check lint test resource-tests skill-check \
+	filesystem-acceptance benchmark check dist dist-check clean help build-release \
+	static static-x86 static-arm install uninstall install-user uninstall-user fmt
 
-# Targets
-TARGET_NATIVE := $(shell rustc -vV | grep host | cut -d' ' -f2)
-TARGET_MUSL_X86 := x86_64-unknown-linux-musl
-TARGET_MUSL_ARM := aarch64-unknown-linux-musl
+all: check release
 
-# Output paths
-RELEASE_DIR := target/release
-STATIC_X86_DIR := target/$(TARGET_MUSL_X86)/release
-STATIC_ARM_DIR := target/$(TARGET_MUSL_ARM)/release
-DIST_DIR := dist
-
-.PHONY: all build rebuild release static static-x86 static-arm install uninstall \
-        clean dist test fmt lint check pre-commit help
-
-# Default target: show help
-all: help
-
-# Full rebuild from scratch (clears all cargo cache)
-rebuild:
-	$(CARGO) clean
-	$(RM) -r $(HOME)/.cargo/registry/cache
-	$(RM) -r $(HOME)/.cargo/git/checkouts
-	$(CARGO) build --release
-
-# Development build
 build:
-	$(CARGO) build
+	$(CARGO) build --locked
 
-# Optimized release build
 release:
-	$(CARGO) build --release
+	$(CARGO) build --release --locked $(TARGET_FLAG)
 
-# Static Linux binary (x86_64)
+# Compatibility alias for the 2.x target name.
+build-release: release
+
+# Static Linux binaries (musl). Need a musl C compiler for the bundled SQLite.
 static: static-x86
 
 static-x86:
-	@echo "Building static x86_64 binary..."
-	@rustup target add $(TARGET_MUSL_X86) 2>/dev/null || true
-	$(CARGO) build --release --target $(TARGET_MUSL_X86)
-	@echo "Binary: $(STATIC_X86_DIR)/$(BINARY)"
+	$(MAKE) release TARGET=x86_64-unknown-linux-musl
 
-# Static Linux binary (aarch64) - requires cross or appropriate linker
 static-arm:
-	@echo "Building static aarch64 binary..."
-	@rustup target add $(TARGET_MUSL_ARM) 2>/dev/null || true
-	@command -v cross >/dev/null 2>&1 && \
-		cross build --release --target $(TARGET_MUSL_ARM) || \
-		$(CARGO) build --release --target $(TARGET_MUSL_ARM)
-	@echo "Binary: $(STATIC_ARM_DIR)/$(BINARY)"
+	$(MAKE) release TARGET=aarch64-unknown-linux-musl
 
-# Install to system (default: /usr/local/bin)
 install: release
-	$(INSTALL) -d $(DESTDIR)$(BINDIR)
-	$(INSTALL) -m 755 $(RELEASE_DIR)/$(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 $(RELEASE_DIR)/$(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
 	@echo "Installed $(BINARY) to $(DESTDIR)$(BINDIR)"
 
-# Install static binary
-install-static: static-x86
-	$(INSTALL) -d $(DESTDIR)$(BINDIR)
-	$(INSTALL) -m 755 $(STATIC_X86_DIR)/$(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
-	@echo "Installed static $(BINARY) to $(DESTDIR)$(BINDIR)"
-
-# Install to ~/.cargo/bin (user install)
-install-user: release
-	$(CARGO) install --path .
-	@echo "Installed $(BINARY) to ~/.cargo/bin"
-
-# Install static binary to ~/.cargo/bin
-install-static-user: static-x86
-	$(INSTALL) -d $(HOME)/.cargo/bin
-	$(INSTALL) -m 755 $(STATIC_X86_DIR)/$(BINARY) $(HOME)/.cargo/bin/$(BINARY)
-	@echo "Installed static $(BINARY) to ~/.cargo/bin"
-
-# Uninstall from system
 uninstall:
-	$(RM) $(DESTDIR)$(BINDIR)/$(BINARY)
-	@echo "Removed $(BINARY) from $(DESTDIR)$(BINDIR)"
+	rm -f $(DESTDIR)$(BINDIR)/$(BINARY)
 
-# Uninstall from ~/.cargo/bin
+install-user:
+	$(CARGO) install --locked --path .
+
 uninstall-user:
 	$(CARGO) uninstall $(BINARY) 2>/dev/null || true
-	@echo "Removed $(BINARY) from ~/.cargo/bin"
 
-# Create distribution archives
-dist: static-x86
-	@mkdir -p $(DIST_DIR)
-	@cp $(STATIC_X86_DIR)/$(BINARY) $(DIST_DIR)/$(BINARY)-$(VERSION)-linux-x86_64
-	@cd $(DIST_DIR) && tar -czvf $(BINARY)-$(VERSION)-linux-x86_64.tar.gz $(BINARY)-$(VERSION)-linux-x86_64
-	@echo "Created $(DIST_DIR)/$(BINARY)-$(VERSION)-linux-x86_64.tar.gz"
+format:
+	$(CARGO) fmt --all
 
-# Create distribution for both architectures
-dist-all: static-x86 static-arm
-	@mkdir -p $(DIST_DIR)
-	@cp $(STATIC_X86_DIR)/$(BINARY) $(DIST_DIR)/$(BINARY)-$(VERSION)-linux-x86_64
-	@cp $(STATIC_ARM_DIR)/$(BINARY) $(DIST_DIR)/$(BINARY)-$(VERSION)-linux-aarch64
-	@cd $(DIST_DIR) && tar -czvf $(BINARY)-$(VERSION)-linux-x86_64.tar.gz $(BINARY)-$(VERSION)-linux-x86_64
-	@cd $(DIST_DIR) && tar -czvf $(BINARY)-$(VERSION)-linux-aarch64.tar.gz $(BINARY)-$(VERSION)-linux-aarch64
-	@echo "Created archives in $(DIST_DIR)/"
+fmt: format
 
-# Run tests
-test:
-	$(CARGO) test
+format-check:
+	$(CARGO) fmt --all -- --check
 
-# Format code
-fmt:
-	$(CARGO) fmt
-
-# Lint code
 lint:
-	$(CARGO) clippy -- -D warnings
+	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
-# Run pre-commit on all files
-pre-commit:
-	python3 -m pre_commit run --all-files
+test:
+	$(CARGO) test --locked --all-targets
 
-# Check without building
-check:
-	$(CARGO) check
+resource-tests:
+	$(CARGO) test --locked --test resources -- --nocapture
 
-# Clean build artifacts
+skill-check:
+	$(CARGO) test --locked --test agent_skill --test agent_workflows
+
+# Real FIDEDUPERANGE acceptance; set TMPDIR to a Btrfs or XFS directory to exercise it.
+filesystem-acceptance:
+	$(CARGO) test --locked --test extent_dedupe -- --nocapture
+
+benchmark:
+	$(CARGO) bench --locked --bench pipeline
+
+check: format-check lint test
+
+# Release archive: binary, license, README, docs and the version-paired agent skill.
+dist: release
+	rm -rf $(DIST_DIR)/$(PACKAGE) $(DIST_DIR)/$(PACKAGE).tar.gz $(DIST_DIR)/$(PACKAGE).tar.gz.sha256
+	mkdir -p $(DIST_DIR)/$(PACKAGE)/skills $(DIST_DIR)/$(PACKAGE)/docs
+	cp $(RELEASE_DIR)/$(BINARY) LICENSE README.md $(DIST_DIR)/$(PACKAGE)/
+	cp -R skills/rdedupe $(DIST_DIR)/$(PACKAGE)/skills/
+	cp docs/*.md $(DIST_DIR)/$(PACKAGE)/docs/
+	tar -C $(DIST_DIR) -czf $(DIST_DIR)/$(PACKAGE).tar.gz $(PACKAGE)
+	cd $(DIST_DIR) && sha256sum $(PACKAGE).tar.gz > $(PACKAGE).tar.gz.sha256
+
+# Verifies the archive that ships: checksum, contents, and the extracted binary itself.
+dist-check:
+	cd $(DIST_DIR) && sha256sum -c $(PACKAGE).tar.gz.sha256
+	rm -rf $(DIST_DIR)/verify && mkdir -p $(DIST_DIR)/verify
+	tar -C $(DIST_DIR)/verify -xzf $(DIST_DIR)/$(PACKAGE).tar.gz
+	for f in rdedupe LICENSE README.md skills/rdedupe/SKILL.md skills/rdedupe/references/commands.md \
+		skills/rdedupe/references/safety.md skills/rdedupe/references/workflows.md \
+		skills/rdedupe/references/recovery.md skills/rdedupe/templates/completion-report.md \
+		skills/rdedupe/scripts/summarize.py docs/safety.md docs/formats.md docs/cli.md; do \
+		test -f $(DIST_DIR)/verify/$(PACKAGE)/$$f || { echo "missing $$f"; exit 1; }; done
+	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe --version | grep -qx "rdedupe $(VERSION)"
+	grep -q 'version: "$(VERSION)"' $(DIST_DIR)/verify/$(PACKAGE)/skills/rdedupe/SKILL.md
+	mkdir -p $(DIST_DIR)/verify/tree && printf same > $(DIST_DIR)/verify/tree/a && printf same > $(DIST_DIR)/verify/tree/b
+	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe scan $(DIST_DIR)/verify/tree --format jsonl | grep -q '"groups":1'
+	rm -rf $(DIST_DIR)/verify
+	@echo "$(PACKAGE).tar.gz verified"
+
 clean:
 	$(CARGO) clean
-	$(RM) -r $(DIST_DIR)
+	rm -rf $(DIST_DIR)
 
-# Show help
 help:
-	@echo "rdedupe $(VERSION) - duplicate file finder and remover"
-	@echo ""
-	@echo "Build targets:"
-	@echo "  make              Show this help"
-	@echo "  make build        Build debug binary"
-	@echo "  make release      Build optimized release binary"
-	@echo "  make rebuild      Clean all cache and rebuild from scratch"
-	@echo "  make static       Build static x86_64 Linux binary (musl)"
-	@echo "  make static-x86   Build static x86_64 Linux binary (musl)"
-	@echo "  make static-arm   Build static aarch64 Linux binary (musl)"
-	@echo ""
-	@echo "Install targets:"
-	@echo "  make install      Install to $(BINDIR) (may need sudo)"
-	@echo "  make install-static  Install static binary to $(BINDIR)"
-	@echo "  make install-user Install to ~/.cargo/bin"
-	@echo "  make uninstall    Remove from $(BINDIR)"
-	@echo "  make uninstall-user  Remove from ~/.cargo/bin"
-	@echo ""
-	@echo "Distribution:"
-	@echo "  make dist         Create x86_64 release archive"
-	@echo "  make dist-all     Create x86_64 and aarch64 release archives"
-	@echo ""
-	@echo "Development:"
-	@echo "  make test         Run tests"
-	@echo "  make fmt          Format code"
-	@echo "  make lint         Run clippy lints"
-	@echo "  make check        Check code without building"
-	@echo "  make pre-commit   Run pre-commit hooks on all files"
-	@echo "  make clean        Remove build artifacts"
-	@echo ""
-	@echo "Variables:"
-	@echo "  PREFIX=$(PREFIX)  Installation prefix"
-	@echo "  DESTDIR=          Staging directory for packagers"
+	@echo "rdedupe $(VERSION) targets:"
+	@echo "  check                  format-check + lint + test (the PR gate)"
+	@echo "  format-check lint test resource-tests skill-check"
+	@echo "  filesystem-acceptance  real FIDEDUPERANGE tests (TMPDIR on Btrfs/XFS)"
+	@echo "  benchmark              cargo bench workloads (see docs/benchmarks.md)"
+	@echo "  release static install install-user uninstall uninstall-user"
+	@echo "  dist dist-check         release archive (TARGET=x86_64-unknown-linux-musl for static)"

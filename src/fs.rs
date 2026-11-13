@@ -1,69 +1,108 @@
-//! File system operations for walking directories and finding files.
-
-use std::error::Error;
+use crate::config::WALK_OPEN_DIRECTORIES;
+use crate::error::{io, Result};
+use crate::fileinfo::observe_path;
+use crate::model::Unresolved;
+use crate::paths::{os_contains, EncodedPath};
+use crate::store::Store;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use walkdir::WalkDir;
 
-pub fn walk(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut files = Vec::new();
-
-    for entry in WalkDir::new(path) {
-        let entry = entry?;
-
-        if entry.file_type().is_file() {
-            files.push(entry.path().to_string_lossy().to_string());
-        }
-    }
-
-    Ok(files)
+pub struct DiscoveryOptions<'a> {
+    /// Canonical roots.
+    pub roots: &'a [PathBuf],
+    /// Byte substring every inventoried full path must contain (empty matches everything).
+    pub pattern: &'a str,
+    pub one_file_system: bool,
+    /// Exact owned artifact paths (scratch workspace, cache file) never inventoried.
+    pub excluded: &'a HashSet<PathBuf>,
 }
 
-pub fn find(files: Vec<String>, pattern: &str) -> Vec<String> {
-    let mut matches = Vec::new();
-
-    for file in files {
-        if file.contains(pattern) {
-            matches.push(file);
-        }
-    }
-
-    matches
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DiscoveryCounts {
+    pub symlinks_skipped: u64,
+    pub special_files_skipped: u64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_walk_finds_files() {
-        let files = walk("tests/inputs").unwrap();
-        assert!(!files.is_empty());
-        assert!(files.iter().any(|f| f.contains("one.txt")));
+/// Walks every root without following symlinks, in sorted native order, and records each
+/// matching regular file. Traversal and metadata failures become unresolved entries. Paths
+/// reached through several roots are inventoried once; hard-link aliases are resolved
+/// afterwards by [`Store::finalize_aliases`].
+pub fn discover(store: &Store, options: &DiscoveryOptions<'_>) -> Result<DiscoveryCounts> {
+    let mut counts = DiscoveryCounts::default();
+    store.begin()?;
+    for root in options.roots {
+        let root_device = observe_path(root).ok().map(|o| o.identity.device);
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .same_file_system(options.one_file_system)
+            .max_open(WALK_OPEN_DIRECTORIES)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_entry(|entry| {
+                !options.excluded.iter().any(|owned| entry.path() == owned)
+                    && !(entry.file_type().is_dir()
+                        && crate::quarantine::is_owned_quarantine_dir(entry.path()))
+            });
+        for entry in walker {
+            let entry = match entry {
+                Ok(value) => value,
+                Err(error) => {
+                    let path = error.path().unwrap_or(root);
+                    store.insert_unresolved(&Unresolved {
+                        path: EncodedPath::from_path(path),
+                        operation: "traverse".into(),
+                        message: error.to_string(),
+                        retry_safe: true,
+                    })?;
+                    continue;
+                }
+            };
+            let file_type = entry.file_type();
+            if file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if !os_contains(path, options.pattern) {
+                continue;
+            }
+            if file_type.is_symlink() {
+                counts.symlinks_skipped += 1;
+                continue;
+            }
+            if !file_type.is_file() {
+                counts.special_files_skipped += 1;
+                continue;
+            }
+            match observe_path(path) {
+                Ok(obs) => {
+                    if options.one_file_system && root_device != Some(obs.identity.device) {
+                        continue;
+                    }
+                    store.insert_file(path, &obs)?;
+                }
+                Err(error) => store.insert_unresolved(&Unresolved {
+                    path: EncodedPath::from_path(path),
+                    operation: "metadata".into(),
+                    message: error.to_string(),
+                    retry_safe: true,
+                })?,
+            }
+        }
     }
+    store.finalize_aliases()?;
+    Ok(counts)
+}
 
-    #[test]
-    fn test_walk_empty_directory() {
-        let temp_dir = TempDir::new().unwrap();
-        let files = walk(temp_dir.path().to_str().unwrap()).unwrap();
-        assert!(files.is_empty());
+pub fn canonical_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = Vec::with_capacity(roots.len());
+    for root in roots {
+        let canonical =
+            std::fs::canonicalize(root).map_err(|e| io("canonicalize root", root, e))?;
+        if !out.contains(&canonical) {
+            out.push(canonical);
+        }
     }
-
-    #[test]
-    fn test_find_filters_by_pattern() {
-        let files = vec![
-            "file.txt".to_string(),
-            "file.jpg".to_string(),
-            "another.txt".to_string(),
-        ];
-        let matches = find(files, ".txt");
-        assert_eq!(matches.len(), 2);
-        assert!(matches.iter().all(|f| f.contains(".txt")));
-    }
-
-    #[test]
-    fn test_find_no_matches() {
-        let files = vec!["file.txt".to_string(), "file.jpg".to_string()];
-        let matches = find(files, ".pdf");
-        assert!(matches.is_empty());
-    }
+    out.sort_by(|a, b| crate::paths::stable_cmp(a, b));
+    Ok(out)
 }
