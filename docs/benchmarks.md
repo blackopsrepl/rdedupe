@@ -10,31 +10,36 @@ the commands in [Reproducing](#reproducing). Nothing is extrapolated.
 | baseline-2.0.0 | `6ae1d4d` (main before this work) | Polars/MD5 engine; clean worktree, no local patches (the uncommitted 2.0.1 logging change in the original checkout is not included); its own release profile (`opt-level = "z"`, fat LTO) |
 | v3-initial | `81efe19` | first complete 3.0 engine |
 | v3-review | `e134eb7` | after the independent review fixes (full-content refinement for every bucket of three or more) |
-| v3-final | `8fcd6fb` | shipped engine: lockstep one-to-many comparison, on-demand refinement, lean scratch database, 4 readers |
-| v3-final-optz | `8fcd6fb` | same source with `CARGO_PROFILE_RELEASE_OPT_LEVEL=z` (size-oriented) |
+| v3-perf | `8fcd6fb` | after the performance work: lockstep one-to-many comparison, on-demand refinement, lean scratch database, 4 readers |
+| v3-final | `bb571da` | shipped engine: v3-perf plus the issue-audit work (descriptor-relative quarantine, owner/group/creation-time observations, metadata-difference reporting, cancellation everywhere, scratch-marker cleanup, scan-owned buffer pool, queue budget, resume) |
+| v3-final-optz | `bb571da` | same source with `CARGO_PROFILE_RELEASE_OPT_LEVEL=z` (size-oriented) |
 
-All built with rustc 1.98.1, `cargo build --release --locked`, 4 jobs. The 3.0 release
-profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`, stripped.
+All are built with rustc 1.98.1 and `cargo build --release --locked` with 4 jobs, each in
+its own target directory; the binaries' SHA-256 hashes were checked to be distinct. The
+3.0 release profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`,
+stripped.
 
 | | baseline-2.0.0 | v3-final |
 |---|---:|---:|
-| clean release build, no compiler cache, 4 jobs | 109.1 s | 52.7 s |
-| release binary | 8,204,200 bytes | 3,491,624 bytes |
+| clean release build, no compiler cache, 4 jobs | 109.1 s | 58.5 s |
+| release binary | 8,204,200 bytes | 3,580,520 bytes |
 
 ## Host and conditions
 
 - CPU: 12th Gen Intel Core i5-12400 (6 cores, 12 threads); 62 GiB RAM; Linux 6.12.
 - Storage: fixtures on Samsung MZVL2512HCJQ NVMe, Btrfs (`ssd,discard=async`). The 3.0
   scratch database lives in the same filesystem (`$TMPDIR`).
-- Shared host: other workloads kept the load average at about 5 during the runs;
-  every binary ran interleaved within each repeat, so drift affects all of them equally.
+- Shared host: an unrelated compile job kept the load average between 7 and 9 during the
+  final run. Every binary ran interleaved within each repeat, so the drift affects all of
+  them equally; absolute times are higher than on an idle machine.
 - **warm**: fixture pages resident. **cold**: before every run, each fixture file is
   evicted with `posix_fadvise(POSIX_FADV_DONTNEED)`; no global cache is ever dropped.
-- 5 repeats per binary, case and condition; tables show medians. Wall time from a
+- 5 repeats per binary, case and condition; tables show medians. Wall time comes from a
   blocking wait (no polling), peak RSS from `/usr/bin/time`.
 - **content MB read** and **peak fds** come from one extra untimed run under `strace`:
-  bytes returned by `read`/`pread64`/`readv` on descriptors opened under the fixture
-  directory, and the maximum number of descriptors open at once in the whole process.
+  - content MB read is the bytes returned by `read`/`pread64`/`readv` on descriptors
+    opened under the fixture directory;
+  - peak fds is the maximum number of descriptors open at once in the whole process.
 - Each binary runs its legacy report route, `rdedupe DIR`, which both versions accept.
   The 2.x engine hashes every same-size file with MD5 and never compares bytes; 3.0
   compares every group byte for byte, so the two do different amounts of verification.
@@ -47,11 +52,12 @@ profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`, strip
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 15.6 | 19.1 | 10,592 | 39.0 | 13 |
-| v3-initial | 34.8 | 53.2 | 6,208 | 19.7 | 8 |
-| v3-review | 35.1 | 53.3 | 6,464 | 19.7 | 8 |
-| v3-final | 9.5 | 19.2 | 6,600 | 19.7 | 8 |
-| v3-final-optz | 10.1 | 19.8 | 5,696 | 19.7 | 8 |
+| baseline-2.0.0 | 16.4 | 19.6 | 10,872 | 39.2 | 15 |
+| v3-initial | 35.1 | 53.9 | 6,216 | 19.7 | 8 |
+| v3-review | 35.5 | 54.2 | 6,372 | 19.7 | 8 |
+| v3-perf | 9.6 | 19.8 | 6,652 | 19.6 | 8 |
+| v3-final | 10.2 | 21.1 | 6,220 | 19.6 | 8 |
+| v3-final-optz | 11.2 | 21.6 | 5,204 | 19.5 | 8 |
 
 ### large-duplicates
 
@@ -59,11 +65,12 @@ profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`, strip
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 86.0 | 110.9 | 168,880 | 201.3 | 13 |
-| v3-initial | 72.0 | 92.2 | 5,684 | 371.3 | 8 |
-| v3-review | 99.5 | 123.8 | 6,464 | 572.8 | 8 |
-| v3-final | 29.9 | 54.0 | 6,376 | 237.2 | 10 |
-| v3-final-optz | 30.6 | 52.8 | 5,436 | 237.2 | 10 |
+| baseline-2.0.0 | 106.7 | 152.7 | 201,592 | 201.3 | 15 |
+| v3-initial | 76.5 | 99.5 | 5,704 | 371.5 | 8 |
+| v3-review | 112.0 | 130.6 | 6,416 | 572.8 | 8 |
+| v3-perf | 32.7 | 59.6 | 6,488 | 237.2 | 10 |
+| v3-final | 33.3 | 66.9 | 6,436 | 237.2 | 10 |
+| v3-final-optz | 34.7 | 59.1 | 5,228 | 237.2 | 10 |
 
 ### same-size-distinct
 
@@ -71,11 +78,12 @@ profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`, strip
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 35.6 | 37.0 | 10,652 | 65.3 | 13 |
-| v3-initial | 61.0 | 111.3 | 6,620 | 65.5 | 8 |
-| v3-review | 59.1 | 111.6 | 7,076 | 65.5 | 8 |
-| v3-final | 24.2 | 55.3 | 7,608 | 65.4 | 8 |
-| v3-final-optz | 24.4 | 57.2 | 6,452 | 65.4 | 8 |
+| baseline-2.0.0 | 24.2 | 34.2 | 10,944 | 65.3 | 15 |
+| v3-initial | 59.7 | 113.3 | 6,780 | 65.5 | 8 |
+| v3-review | 52.4 | 112.8 | 7,120 | 65.5 | 8 |
+| v3-perf | 19.1 | 55.3 | 7,504 | 65.3 | 8 |
+| v3-final | 20.0 | 55.3 | 6,760 | 65.3 | 8 |
+| v3-final-optz | 22.3 | 58.6 | 5,580 | 65.3 | 8 |
 
 ### sample-collisions
 
@@ -83,11 +91,12 @@ profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`, strip
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 22.6 | 27.8 | 14,464 | 61.4 | 13 |
-| v3-initial | 547.5 | 600.2 | 6,092 | 5256.0 | 8 |
-| v3-review | 55.8 | 91.8 | 6,468 | 100.8 | 8 |
-| v3-final | 16.7 | 36.6 | 7,132 | 101.9 | 9 |
-| v3-final-optz | 17.3 | 37.1 | 6,076 | 101.9 | 9 |
+| baseline-2.0.0 | 24.9 | 30.5 | 15,712 | 61.1 | 15 |
+| v3-initial | 604.7 | 653.0 | 6,200 | 5256.0 | 8 |
+| v3-review | 52.6 | 89.9 | 6,600 | 100.8 | 8 |
+| v3-perf | 16.9 | 37.0 | 7,124 | 101.9 | 9 |
+| v3-final | 18.0 | 37.2 | 6,912 | 101.9 | 9 |
+| v3-final-optz | 18.6 | 40.7 | 5,680 | 101.9 | 9 |
 
 ### shared-prefix
 
@@ -95,11 +104,12 @@ profile is `opt-level = 3`, thin LTO, one codegen unit, `panic = "abort"`, strip
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 24.3 | 38.7 | 10,800 | 65.3 | 13 |
-| v3-initial | 50.6 | 115.0 | 6,812 | 65.5 | 8 |
-| v3-review | 52.1 | 117.0 | 7,192 | 65.5 | 8 |
-| v3-final | 18.9 | 51.9 | 7,696 | 65.3 | 8 |
-| v3-final-optz | 20.8 | 54.5 | 6,404 | 65.3 | 8 |
+| baseline-2.0.0 | 34.2 | 36.6 | 10,980 | 65.4 | 15 |
+| v3-initial | 64.4 | 113.8 | 6,860 | 65.5 | 8 |
+| v3-review | 62.5 | 113.2 | 7,044 | 65.5 | 8 |
+| v3-perf | 20.4 | 53.0 | 7,616 | 65.2 | 8 |
+| v3-final | 21.5 | 54.0 | 6,676 | 65.5 | 8 |
+| v3-final-optz | 22.5 | 55.7 | 5,708 | 65.4 | 8 |
 
 ### sparse
 
@@ -107,11 +117,12 @@ two 64 MiB holes and one 64 MiB + 1 byte hole (3 entries, 201.3 MB logical).
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 144.8 | 167.6 | 201,864 | 201.3 | 6 |
-| v3-initial | 48.4 | 84.9 | 5,784 | 134.6 | 8 |
-| v3-review | 40.1 | 75.0 | 5,900 | 134.6 | 8 |
-| v3-final | 18.7 | 53.5 | 5,888 | 134.6 | 6 |
-| v3-final-optz | 18.6 | 52.5 | 4,980 | 134.6 | 6 |
+| baseline-2.0.0 | 167.8 | 206.4 | 201,892 | 201.3 | 6 |
+| v3-initial | 48.8 | 81.8 | 5,748 | 134.6 | 8 |
+| v3-review | 40.8 | 72.5 | 5,888 | 134.6 | 8 |
+| v3-perf | 19.4 | 51.6 | 5,920 | 134.6 | 6 |
+| v3-final | 20.3 | 50.0 | 5,824 | 134.6 | 6 |
+| v3-final-optz | 20.0 | 50.3 | 4,980 | 134.6 | 6 |
 
 ### tiny-duplicates
 
@@ -119,11 +130,12 @@ two 64 MiB holes and one 64 MiB + 1 byte hole (3 entries, 201.3 MB logical).
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 16.4 | 16.1 | 15,992 | 0.5 | 13 |
-| v3-initial | 303.0 | 299.3 | 12,636 | 1.1 | 8 |
-| v3-review | 445.4 | 467.9 | 14,044 | 1.6 | 9 |
-| v3-final | 157.9 | 165.6 | 14,224 | 1.0 | 8 |
-| v3-final-optz | 187.7 | 190.9 | 13,152 | 1.0 | 8 |
+| baseline-2.0.0 | 16.0 | 20.4 | 16,284 | 0.5 | 15 |
+| v3-initial | 301.3 | 316.3 | 12,492 | 1.1 | 8 |
+| v3-review | 448.3 | 461.1 | 13,736 | 1.6 | 9 |
+| v3-perf | 170.4 | 160.1 | 14,084 | 1.0 | 8 |
+| v3-final | 183.8 | 192.8 | 13,636 | 1.0 | 8 |
+| v3-final-optz | 204.9 | 219.7 | 12,516 | 1.0 | 8 |
 
 ### unique-sizes
 
@@ -131,27 +143,39 @@ two 64 MiB holes and one 64 MiB + 1 byte hole (3 entries, 201.3 MB logical).
 
 | binary | warm ms | cold ms | peak RSS KiB | content MB read | peak fds |
 |---|---:|---:|---:|---:|---:|
-| baseline-2.0.0 | 17.4 | 32.9 | 10,368 | 39.8 | 13 |
-| v3-initial | 34.0 | 33.6 | 6,068 | 0.0 | 7 |
-| v3-review | 33.3 | 33.7 | 6,140 | 0.0 | 7 |
-| v3-final | 8.5 | 8.7 | 6,204 | 0.0 | 5 |
-| v3-final-optz | 9.7 | 9.7 | 5,172 | 0.0 | 5 |
+| baseline-2.0.0 | 19.7 | 32.3 | 10,788 | 39.8 | 15 |
+| v3-initial | 33.7 | 34.0 | 6,100 | 0.0 | 7 |
+| v3-review | 34.1 | 34.0 | 6,040 | 0.0 | 7 |
+| v3-perf | 9.0 | 9.1 | 6,224 | 0.0 | 5 |
+| v3-final | 10.0 | 10.0 | 6,424 | 0.0 | 5 |
+| v3-final-optz | 11.2 | 11.3 | 5,268 | 0.0 | 5 |
 
 ## Attribution
 
-Each row compares measured revisions on the workload that isolates the change.
+Each row compares measured revisions (same run) on the workload that isolates the change.
 
 | change | workload | before | after |
 |---|---|---|---|
 | size-first elimination (files of unique size are never opened) | unique-sizes | baseline: 39.8 MB read | v3-final: 0.0 MB read |
-| hard links resolved as aliases before reading | hardlinks | baseline: 39.0 MB read | v3-final: 19.7 MB read |
-| size elimination plus streaming comparison | sparse | baseline: 201.3 MB read, 201,864 KiB RSS | v3-final: 134.6 MB read, 5,888 KiB RSS |
-| streaming, bounded buffers instead of whole-file reads | large-duplicates | baseline: 168,880 KiB RSS | v3-final: 6,376 KiB RSS |
-| full-content refinement of colliding samples (review finding 6) | sample-collisions | v3-initial: 5256.0 MB read, 547.5 ms warm | v3-review: 100.8 MB read, 55.8 ms warm |
-| lockstep one-to-many comparison, refinement only past two classes | large-duplicates | v3-review: 572.8 MB read | v3-final: 237.2 MB read |
-| scratch database without fsync, prepared statements, in-memory one-page classes, no rollback journal, 4 readers | unique-sizes / tiny-duplicates | v3-review: 33.3 / 445.4 ms warm | v3-final: 8.5 / 157.9 ms warm |
+| hard links resolved as aliases before reading | hardlinks | baseline: 39.2 MB read | v3-final: 19.6 MB read |
+| size elimination plus streaming comparison | sparse | baseline: 201.3 MB read, 201,892 KiB RSS | v3-final: 134.6 MB read, 5,824 KiB RSS |
+| streaming, bounded buffers instead of whole-file reads | large-duplicates | baseline: 201,592 KiB RSS | v3-final: 6,436 KiB RSS |
+| full-content refinement of colliding samples (review finding 6) | sample-collisions | v3-initial: 5256.0 MB read, 604.7 ms warm | v3-review: 100.8 MB read, 52.6 ms warm |
+| lockstep one-to-many comparison, refinement only past two classes | large-duplicates | v3-review: 572.8 MB read | v3-perf: 237.2 MB read |
+| scratch database without fsync, prepared statements, in-memory one-page classes, no rollback journal, 4 readers | unique-sizes / tiny-duplicates | v3-review: 34.1 / 448.3 ms warm | v3-perf: 9.0 / 170.4 ms warm |
+| issue-audit work (safety, metadata, cancellation, resume) | tiny-duplicates | v3-perf: 170.4 ms warm | v3-final: 183.8 ms warm |
 
-Steps inside the last row, measured while developing it (`rdedupe DIR` on
+The last row is a cost, not a gain. On tiny-duplicates, where 6,000 report members are the
+work, `perf stat` on the legacy route (5 runs) attributes it to kernel time. Reporting
+whether each copy's extended attributes differ from its keeper's takes one `llistxattr`
+per member. The call resolves the full path, and Linux 6.12 offers no
+directory-relative variant. It added about 149M kernel instructions per run before
+`bb571da`, which skips the second call for files without attributes and stops waking the
+buffer pool's condition variable when nobody waits; together those removed about 70M of
+them. The remaining cost is the price of not silently dropping permissions, ownership or
+attributes.
+
+Steps inside the database row, measured while developing it (`rdedupe DIR` on
 tiny-duplicates, warm, medians of 7 runs unless noted):
 
 | step | before | after |
@@ -167,7 +191,8 @@ counts 4 before, 0 after); its time effect is included in the row above.
 
 ### Readers and buffers
 
-`rdedupe scan`, median of 5, warm / cold ms, 256 KiB buffer:
+Measured on `8fcd6fb` while choosing the defaults and not re-run at `bb571da` (whose
+buffer pool changes how buffers are allocated, not how many there are or their size). `rdedupe scan`, median of 5, warm / cold ms, 256 KiB buffer:
 
 | --readers | same-size-distinct | large-duplicates | tiny-duplicates |
 |---:|---:|---:|---:|
@@ -176,10 +201,10 @@ counts 4 before, 0 after); its time effect is included in the row above.
 | 4 | 17.9 / 54.7 | 30.7 / 49.4 | 150.6 / 154.4 |
 | 8 | 15.6 / 38.6 | 29.4 / 48.7 | 148.8 / 155.2 |
 
-`--readers 4` is the default: it is faster than 2 warm and cold on this NVMe device. Eight
-readers are faster still for many small files read cold, but every reader costs a buffer
-and a descriptor, and concurrent random reads can lose on rotational disks (the command
-reference recommends `--readers 1` there), so the default stays moderate.
+`--readers 4` is the default because it is faster than 2, warm and cold, on this NVMe
+device. Eight readers are faster still for many small files read cold. But every reader
+costs a buffer and a descriptor, and concurrent random reads can lose on rotational disks
+(the command reference recommends `--readers 1` there), so the default stays moderate.
 
 `rdedupe scan`, median of 5, warm / cold ms, 4 readers:
 
@@ -194,10 +219,12 @@ reference recommends `--readers 1` there), so the default stays moderate.
 
 ### Release profile
 
-`opt-level = 3` is kept: the size-oriented build (`z`) is 1,111,392 bytes
-smaller (2,380,232 vs 3,489,960) but slower where CPU matters
-(tiny-duplicates 187.7 vs
-157.9 ms warm) and 1–15% slower on the other warm workloads.
+`opt-level = 3` is kept. The size-oriented build (`z`) is
+1,132,640 bytes smaller
+(2,446,280 vs 3,578,920), but it is slower
+where CPU matters (tiny-duplicates 204.9 vs
+183.8 ms warm) and slower or equal on the other warm
+workloads.
 
 ### Hash choice
 
@@ -208,45 +235,92 @@ database and comparison reads. No hash microbenchmark is used to claim anything.
 
 ## In-process pipeline (`cargo bench --bench pipeline`)
 
-Library scans of generated fixtures (fixed seeds, fresh temporary directory, 5 repeats,
-default budget unless named), revision `8fcd6fb`:
+These are library scans of generated fixtures: fixed seeds, a fresh temporary directory,
+5 repeats, and the default budget unless the workload name says otherwise. Revision
+`bb571da`. "page cache" is the SQLite page-cache cap derived from the budget;
+"inventory" is the final size of the on-disk inventory database.
 
-| workload | median ms | paths | groups | fingerprint MB | full-content MB | comparison MB | eliminated by size |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| unique-sizes | 5.8 | 1,200 | 0 | 0.0 | 0.0 | 0.0 | 1,200 |
-| same-size-distinct | 15.1 | 1,000 | 0 | 65.5 | 0.0 | 0.0 | 0 |
-| shared-prefix | 14.9 | 1,000 | 0 | 65.5 | 0.0 | 0.0 | 0 |
-| tiny-duplicates | 111.8 | 6,000 | 2,000 | 0.5 | 0.0 | 0.5 | 0 |
-| large-duplicates | 26.1 | 12 | 1 | 2.4 | 0.0 | 234.9 | 0 |
-| large-group | 81.5 | 5,000 | 1 | 0.1 | 0.0 | 0.2 | 0 |
-| hard-links | 7.4 | 600 | 0 | 19.7 | 0.0 | 0.0 | 0 |
-| sparse | 13.1 | 3 | 1 | 0.4 | 0.0 | 134.2 | 1 |
-| sample-collisions | 12.8 | 200 | 0 | 39.3 | 61.4 | 1.2 | 0 |
-| tiny-duplicates-8mib-budget | 123.3 | 6,000 | 2,000 | 0.5 | 0.0 | 0.6 | 0 |
+| workload | median ms | paths | groups | fingerprint MB | full-content MB | comparison MB | page cache MiB | inventory MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| unique-sizes | 7.6 | 1,200 | 0 | 0.0 | 0.0 | 0.0 | 58.8 | 0.5 |
+| same-size-distinct | 17.1 | 1,000 | 0 | 65.5 | 0.0 | 0.0 | 58.8 | 0.7 |
+| shared-prefix | 16.8 | 1,000 | 0 | 65.5 | 0.0 | 0.0 | 58.8 | 0.7 |
+| tiny-duplicates | 126.8 | 6,000 | 2,000 | 0.5 | 0.0 | 0.5 | 58.8 | 4.9 |
+| large-duplicates | 32.9 | 12 | 1 | 2.4 | 0.0 | 234.9 | 58.8 | 0.1 |
+| large-group | 99.9 | 5,000 | 1 | 0.1 | 0.0 | 0.2 | 58.8 | 4.4 |
+| hard-links | 8.3 | 600 | 0 | 19.7 | 0.0 | 0.0 | 58.8 | 0.4 |
+| sparse | 17.9 | 3 | 1 | 0.4 | 0.0 | 134.2 | 58.8 | 0.1 |
+| sample-collisions | 15.4 | 200 | 0 | 39.3 | 61.4 | 1.2 | 58.8 | 0.2 |
+| tiny-duplicates-8mib-budget | 172.7 | 6,000 | 2,000 | 0.5 | 0.0 | 0.6 | 3.9 | 4.9 |
+| large-inventory-7mib-budget | 1812.2 | 60,000 | 20,000 | 5.7 | 0.0 | 3.8 | 3.2 | 47.5 |
+
+`large-inventory-7mib-budget` runs 60,000 files (20,000 duplicate pairs) at the 7 MiB
+minimum memory budget with `--queue 64`. The inventory ends
+14.6 times
+larger than the page cache, so every stage works from paged, on-disk state, and the
+groups stay exact (`tests/resources.rs` checks the same shape against an independent
+oracle).
+
+## Repeat scans with a cache
+
+This is measured separately from fresh verification, as the issue requires.
+`repeat-scan-cache` holds 1,000 distinct 64 KiB files plus 200 duplicates, scanned warm
+after one cache-writing warm-up. Each mode is the median of 5 (min–max):
+
+| mode | exactness | median ms | fingerprint MB read | cached fingerprints reused |
+|---|---|---:|---:|---:|
+| fresh | exact | 38.2 (32.5–39.2) | 78.6 | 0 |
+| exact-with-cache | exact | 55.4 (48.7–59.4) | 78.6 | 0 |
+| trusted-cache | heuristic | 42.0 (39.6–47.8) | 0.0 | 1,200 |
+
+- **No cache win on this host.** With the files' pages resident, loading and rewriting
+  the cache costs more than re-reading them.
+- **Exact mode** (`--cache` without `--trust-cache`) never uses cached fingerprints,
+  because the exactness contract requires current content. It can therefore only add
+  cost: it pays for maintaining the cache and reads everything anyway.
+- **`--trust-cache`** skips every fingerprint read. It is still slower than fresh here, and
+  its scans are `heuristic`, so plans refuse them.
+- **Where it could pay off:** a trusted cache could help on storage where reads are
+  expensive (cold rotational disks, network filesystems). That was not measured here,
+  so it is not claimed.
 
 ## Memory and descriptors under a small budget
 
-A 4,000-member group of 32-byte files plus two identical 256 MiB files, scanned by
-v3-final with `--memory-mib 16 --format jsonl`, 5 runs: peak RSS
-11,472–11,692 KiB (median 11,652), 10 descriptors
-open at most, 537.5 MB of content read. The engine's budget
-covers the SQLite page cache (11,272,192 bytes here), read buffers and a fixed
-allowance; whole-process RSS adds the binary and allocator overhead.
+The v3-final release binary scanned the 4,000-member group plus two identical 256 MiB
+files with `--memory-mib 16 --format jsonl` five times; peak RSS was
+10,544–10,972 KiB (median 10,636).
+
+`tests/resources.rs`, run against the debug test binary at `bb571da`:
+
+- **One large group plus two big files:** a 4,000-member group of 32-byte files plus two
+  identical 256 MiB files, scanned with `--memory-mib 16 --buffer-kib 64 --readers 2`
+  under `RLIMIT_NOFILE=16`. Peak RSS was 13,428 KiB.
+- **Large inventory:** 60,600 paths at `--memory-mib 7 --queue 64 --readers 1` under
+  `RLIMIT_NOFILE=16`.
+  - The inventory database ended at 47,714,304 bytes against a 3,407,872-byte page cache.
+  - Peak RSS was 12,128 KiB.
+  - At most 6 descriptors were open, sampled from `/proc/<pid>/fd` every millisecond.
+
+The engine's budget covers the SQLite page cache, the read buffers, the queue and a fixed
+allowance. Whole-process RSS adds the binary and the allocator overhead.
 
 ## Frozen targets
 
-Derived from the measurements above; a change that exceeds one needs its own measured
-justification:
+These are derived from the measurements above; a change that exceeds one needs its own
+measured justification:
 
 - content bytes read per workload no higher than v3-final's column above;
 - peak RSS under the default budget no higher than 16 MiB on every workload here;
 - peak open descriptors no higher than 13 + `--readers`;
 - no `fsync` during `scan`.
 
-Where 3.0 is slower than 2.x — tiny-duplicates, and cold runs of many 64 KiB files — the
-cost is exact byte verification, stability checks around every read, and the disk-backed
-inventory that keeps memory bounded. These are accepted, not regressions to fix by
-weakening exactness.
+Where 3.0 is slower than 2.x, the cost is the work 2.x skipped:
+
+- **Where:** tiny-duplicates (6,000 tiny files), and cold runs of many 64 KiB files.
+- **Why:** exact byte verification, stability checks around every read, the disk-backed
+  inventory that keeps memory bounded, and per-copy metadata comparison.
+- **Decision:** these are accepted. They are not regressions to fix by weakening
+  exactness.
 
 ## Reproducing
 
@@ -255,9 +329,9 @@ weakening exactness.
 cargo build --release --locked
 # CLI before/after on generated fixtures (writes compare.json):
 make benchmark-compare BASELINE=/path/to/rdedupe-2.0.0 BENCH_DIR=/path/with/space
-# or with several binaries:
+# or with several binaries (build each revision in its own CARGO_TARGET_DIR):
 python3 benches/compare.py FIXTURE_DIR OUT.json baseline=/path/a v3=/path/b
-# In-process workloads:
+# In-process workloads, including the large inventory and the cache modes:
 make benchmark
 ```
 
