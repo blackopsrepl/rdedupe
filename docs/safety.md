@@ -14,6 +14,13 @@ For mutation on a tree that cannot be stopped, scan and plan against a filesyste
 snapshot to understand the duplicates, but apply against the live tree only during a
 maintenance window. A snapshot does not make actions on the live tree safe.
 
+Without knowing whether a tree is idle, an apply is still bounded: every action is
+re-verified immediately before it runs, and a write that lands after that check ends up
+in quarantine with its new bytes, restorable, while `purge` refuses anything that no
+longer matches its keeper. The agent skill therefore proceeds with authorized quarantine
+runs unless there is evidence of concurrent writers, and reports that activity was not
+confirmed.
+
 ## What is checked before every action
 
 For each action, in order, immediately before any change:

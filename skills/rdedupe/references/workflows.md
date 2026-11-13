@@ -32,8 +32,9 @@ only. Existing PLAN, JOURNAL and `--output` paths are refused, never overwritten
 
 ## 3. Protected-source cleanup into quarantine (quarantine level)
 
-- Prerequisites: explicit request to remove copies; the user named what to keep; the tree
-  is quiescent.
+- Prerequisites: explicit request to remove copies; the user named what to keep (or accepts
+  the default keeper order); no evidence that the tree is being written (see
+  `safety.md`; do not ask about it as a routine question).
 - Side effects: eligible copies move into `.rdedupe-quarantine/` beside them; a plan and a
   journal are created.
 - Run:

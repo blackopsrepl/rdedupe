@@ -32,10 +32,12 @@ Refuse to apply when any of these holds:
 
 - The scan or plan is partial, cancelled or heuristic (`plan` already refuses these).
 - Unresolved entries exist that the user has not acknowledged.
-- The tree is being written to. rdedupe re-checks every action immediately before acting
-  and refuses changed files, but it cannot freeze a live tree: a write landing between
-  its final check and the move is not detected. Ask for quiescence, or work on a
-  snapshot mount, and say which.
+- There is evidence the tree is being written to (the user mentioned an active sync,
+  import or backup; the scan reported files changing while read; `lsof +D ROOT` shows
+  writers). rdedupe re-checks every action immediately before acting and refuses changed
+  files, but it cannot freeze a live tree: a write landing between its final check and the
+  move is not detected (the written bytes end up in quarantine, restorable). Without such
+  evidence, do not ask: proceed and state in the report that activity was not confirmed.
 - The plan is older than the user's last change to the tree. Re-plan.
 - For extent plans: `rdedupe capabilities --path ROOT` does not print
   `extent-probe=supported`. A failed extent action leaves files untouched and is
