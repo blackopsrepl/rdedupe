@@ -655,7 +655,7 @@ fn partial_scan_recipe_reports_unresolved_paths_and_plan_refuses() {
         .filter(|r| r["record"] == "unresolved")
         .map(|r| decode_path(&r["path"]))
         .collect();
-    assert_eq!(unresolved, [locked.clone()]);
+    assert_eq!(unresolved, vec![locked.clone()]);
     let work = Fixture::new();
     rdedupe()
         .args(["plan", fixture.str(), "--output"])

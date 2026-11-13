@@ -280,21 +280,32 @@ fn crash_child_process() {
     if let Ok(limit) = std::env::var("RDEDUPE_TEST_FILE_SIZE_LIMIT") {
         // A file-size limit makes the journal write fail part-way, exactly like a full
         // disk: the write returns an error (EFBIG instead of ENOSPC) after a prefix of the
-        // record may have reached the file.
+        // record may have reached the file. The limit is installed once the first record
+        // is durable, i.e. after the plan was verified and its index built, so it is the
+        // journal that runs into it.
         let limit: libc::rlim_t = limit.parse().unwrap();
         unsafe {
             libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
-            let rl = libc::rlimit {
-                rlim_cur: limit,
-                rlim_max: limit,
-            };
-            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &rl), 0);
         }
-        let result = rdedupe::delete::execute(
+        struct LimitAfterFirstRecord(libc::rlim_t, Cell<bool>);
+        impl JournalHooks for LimitAfterFirstRecord {
+            fn after_sync(&self, _: &JournalEntry) -> rdedupe::Result<()> {
+                if !self.1.replace(true) {
+                    let rl = libc::rlimit {
+                        rlim_cur: self.0,
+                        rlim_max: self.0,
+                    };
+                    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &rl) }, 0);
+                }
+                Ok(())
+            }
+        }
+        let result = rdedupe::delete::execute_with_hooks(
             &plan,
             &journal,
             65_536,
             &Cancellation::default(),
+            &LimitAfterFirstRecord(limit, Cell::new(false)),
             |_| Ok(()),
         );
         let code = match result {
