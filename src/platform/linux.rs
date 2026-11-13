@@ -5,8 +5,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// `_IOWR(0x94, 54, struct file_dedupe_range)` from `linux/fs.h`.
-const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;
+/// `_IOWR(0x94, 54, struct file_dedupe_range)` from `linux/fs.h`. glibc declares the
+/// `ioctl` request as `unsigned long`, musl as `int`; the cast keeps the same 32 bits.
+const FIDEDUPERANGE: libc::Ioctl = 0xc018_9436_u32 as libc::Ioctl;
 const FILE_DEDUPE_RANGE_SAME: i32 = 0;
 const FILE_DEDUPE_RANGE_DIFFERS: i32 = 1;
 

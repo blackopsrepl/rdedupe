@@ -35,9 +35,29 @@ pub enum Location {
     Absent,
 }
 
-fn identity_at(path: &Path) -> Result<Option<FileIdentity>> {
+/// What identifies the journaled object at a path. A rename keeps identity, size and
+/// modification time, while a different object that happens to reuse the inode number
+/// (common on ext4 right after a delete) almost never matches all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seen {
+    identity: FileIdentity,
+    size: u64,
+    modified_ns: i128,
+}
+
+impl Seen {
+    fn of(observation: &crate::model::Observation) -> Self {
+        Self {
+            identity: observation.identity,
+            size: observation.size,
+            modified_ns: observation.modified_ns,
+        }
+    }
+}
+
+fn seen_at(path: &Path) -> Result<Option<Seen>> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(crate::platform::observation(&metadata).identity)),
+        Ok(metadata) => Ok(Some(Seen::of(&crate::platform::observation(&metadata)))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io("metadata", path, error)),
     }
@@ -72,10 +92,10 @@ fn validate_paths(entry: &JournalEntry) -> Result<()> {
 
 pub fn locate(entry: &JournalEntry) -> Result<Location> {
     validate_paths(entry)?;
-    let expected = entry.target_observation.identity;
-    let target = identity_at(&entry.target.to_path()?)?;
+    let expected = Seen::of(&entry.target_observation);
+    let target = seen_at(&entry.target.to_path()?)?;
     let quarantined = match &entry.quarantine {
-        Some(path) => identity_at(&path.to_path()?)?,
+        Some(path) => seen_at(&path.to_path()?)?,
         None => None,
     };
     Ok(match (quarantined, target) {
@@ -243,7 +263,9 @@ pub fn purge(
                 let keeper = entry.keeper.to_path()?;
                 let keeper_ok = match compare::equal(&object, &keeper, buffer_bytes, cancel) {
                     Ok((equal, _)) => {
-                        equal && identity_at(&keeper)? != Some(entry.target_observation.identity)
+                        equal
+                            && seen_at(&keeper)?.map(|seen| seen.identity)
+                                != Some(entry.target_observation.identity)
                     }
                     Err(Error::Cancelled) => return Err(Error::Cancelled),
                     Err(_) => false,

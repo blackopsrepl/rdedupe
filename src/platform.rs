@@ -153,10 +153,38 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
     {
         linux::rename_noreplace(from, to)
     }
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     {
-        // A hard link is created atomically and fails with EEXIST; the source name is then
-        // removed. Both names refer to the same inode in between, so content is never lost.
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| {
+            std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| Error::Capability("path contains a NUL byte".into()))
+        };
+        let (source, destination) = (c(from)?, c(to)?);
+        // SAFETY: both pointers are valid NUL-terminated strings for the call's duration.
+        let rc =
+            unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io(
+                "rename without replacement",
+                to,
+                std::io::Error::last_os_error(),
+            ))
+        }
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        // No atomic no-replace rename: a hard link is created atomically and fails with
+        // EEXIST; the source name is then removed. Both names refer to the same inode in
+        // between, so content is never lost. Directories cannot be linked, so creating a
+        // quarantine root fails here and its actions are skipped, never forced.
+        if std::fs::symlink_metadata(from).is_ok_and(|m| m.is_dir()) {
+            return Err(Error::Capability(
+                "no-replace rename of a directory is unsupported on this platform".into(),
+            ));
+        }
         std::fs::hard_link(from, to).map_err(|e| io("link without replacement", to, e))?;
         std::fs::remove_file(from).map_err(|e| io("remove original name", from, e))
     }
