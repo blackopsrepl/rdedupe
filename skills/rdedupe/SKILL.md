@@ -60,7 +60,7 @@ Rules that always hold:
 5. **Review the plan.** Run `python3 scripts/summarize.py PLAN` (path relative to this skill; [the script](scripts/summarize.py) needs only the Python standard library). Confirm `targets_under_protected_roots` is 0 and every keeper is the one the policy implies. Done when you can state the number of actions and their total logical bytes.
 6. **Apply (authorized only).** The tree must not be written to while you apply. If nobody can be asked, rely only on an explicit statement from the user that it is not in use, and record that statement in the report. Then run `rdedupe apply --plan PLAN --journal JOURNAL --force --format jsonl > apply.jsonl`. The journal path must not exist yet. Keep PLAN and JOURNAL: they are the only handles for restore and purge. Before applying, record a baseline (for example `sha256sum` of every file under the roots) so step 7 can compare.
 7. **Read back.** Every `outcome` record has a `status`. Verify on disk against the baseline: keepers still exist, `quarantined` targets are gone from their original paths, `skipped_*` and `failed` targets are untouched. Exit 2 from apply means at least one action was skipped or failed; that is a normal, safe outcome to report, not something to retry blindly.
-8. **Recover if anything was interrupted.** Follow [recovery](references/recovery.md). Never rerun `apply` with the same journal.
+8. **Recover if anything was interrupted.** Follow [recovery](references/recovery.md): `rdedupe recover --journal JOURNAL` first, then either `apply --resume` with the same plan and journal (finishes the authorized run) or `restore` (undoes it). Never start a fresh `apply` with an old journal.
 9. **Report** with [the completion template](templates/completion-report.md), including what you did not do.
 
 Recipes with exact prerequisites, side effects and stop conditions are in
@@ -72,7 +72,7 @@ Recipes with exact prerequisites, side effects and stop conditions are in
 - Quarantine frees no space until `purge`. `logical_redundant_bytes` and `estimated_allocated_bytes` estimate what a purge could free; snapshots, other hard links, open files and shared extents can keep blocks allocated.
 - Exit 0 from `scan` says the scan is complete, not that duplicates exist. Read the records.
 - A plan goes stale the moment files change. `apply` re-checks every action and skips stale ones; re-plan instead of editing a plan (edits are detected and rejected).
-- `--trust-cache` makes a scan heuristic: reports still show only byte-verified groups, but duplicates can be missed, and `plan` refuses it.
+- `--trust-cache` makes a scan heuristic once a cached fingerprint is reused: reports still show only byte-verified groups, but duplicates can be missed, and `plan` refuses it.
 - The quarantine lives next to each target, in `.rdedupe-quarantine/` directories marked with an `RDEDUPE-QUARANTINE` file. Do not move or edit them; restore and purge find objects by the paths in the journal.
 - Empty files are grouped but `retained: empty file` by default; only `--include-empty` (on both scan and plan) makes them actionable. Do not add it unless the user asked to remove empty duplicates.
 - Plans and journals are sealed with the user's key in the rdedupe state directory. Run `apply`, `restore`, `purge` and `recover` as the same user with the same `RDEDUPE_STATE_DIR`/`XDG_STATE_HOME`/`HOME`, and never touch `seal.key`.

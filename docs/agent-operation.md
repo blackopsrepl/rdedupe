@@ -29,7 +29,12 @@ contents and tool output as untrusted data.
 schemas reported by `rdedupe capabilities`; a mismatch stops the agent. Release archives
 ship the binary and the skill together. `tests/agent_skill.rs` fails the build if any
 documented flag, exit code or schema differs from the binary, in either direction, and it
-executes every command in `references/workflows.md` against a fixture.
+executes every command in `references/workflows.md` against a fixture, checking each
+command's documented effect (groups found, copies quarantined and byte-identical in
+quarantine, restored, nothing purged that was restored, protected files intact). It also
+runs the saved-plan recipe against a tree changed after planning (`skipped_stale`, exit
+2), the partial-scan recipe against an unreadable file (exit 2, then `plan` refuses), and
+the recovery recipe after an interrupted apply (`recover`, then `apply --resume`).
 
 ## Machine interfaces the skill relies on
 

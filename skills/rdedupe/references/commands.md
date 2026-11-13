@@ -27,7 +27,7 @@ only the cache file).
 | `--include-empty` | Make empty files eligible copies. By default empty-file groups are reported but every non-keeper is `retained: empty file`, so plans never act on them (they are often markers such as `__init__.py` or `.gitkeep`). |
 | `--one-file-system` | Do not cross into other filesystems below each root. |
 | `--cache FILE` | Fingerprint cache to refresh after the scan. Never consulted unless `--trust-cache`. FILE must be absent or an existing rdedupe cache; any other file, a symlink or a file with other hard links is refused (exit 4) before scanning and left untouched. |
-| `--trust-cache` | Reuse cached fingerprints whose validators match. Makes the scan heuristic; plans refuse it. |
+| `--trust-cache` | Reuse cached fingerprints whose validators match. The scan is `heuristic` as soon as one is reused (`cached_fingerprints_reused` > 0); plans refuse it. |
 | `--fresh` | Ignore existing cache contents (the cache is still rewritten). |
 | `--progress` | Stage progress on stderr. |
 | `--memory-mib N` | Working-set budget: SQLite page cache + read buffers + queue + 3 MiB allowance (default 64). |
@@ -131,6 +131,14 @@ stdout carries results only. stderr carries diagnostics, prompts and `--progress
 | 64 | Invalid invocation (unknown flag, missing argument). |
 | 130 | Cancelled by SIGINT. A cancelled scan prints a `cancelled` summary. |
 | 141 | stdout closed early (for example piped into `head`). |
+
+Every exit 4 prints two stderr lines: `error: MESSAGE`, then
+`error-category: CATEGORY; retry-safe: yes|no (...)`. CATEGORY is one of `traversal`,
+`metadata`, `read`, `mutation`, `changed`, `budget`, `partial_execution`, `config`,
+`plan`, `journal`, `capability`, `cancelled`, `not_authoritative`, `output`, `internal`.
+`retry-safe: yes` means nothing on disk changed and the same command may be retried after
+fixing the cause. `retry-safe: no` (mutation, partial execution, journal) means files may
+have changed: run `rdedupe recover --journal JOURNAL` before anything else.
 
 ## Paths
 

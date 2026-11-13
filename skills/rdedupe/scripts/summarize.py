@@ -81,6 +81,8 @@ def plan(records):
 
     return {
         "kind": "plan",
+        "completeness": header["completeness"],
+        "exactness": header["exactness"],
         "action": header["action"],
         "roots": [decode(p)["path"] for p in header["roots"]],
         "protect": [decode(p)["path"] for p in header["protect"]],
@@ -88,7 +90,12 @@ def plan(records):
         "actions": len(actions),
         "logical_bytes": sum(a["target_observation"]["size"] for a in actions),
         "targets": [
-            {"target": decode(a["target"])["path"], "keeper": decode(a["keeper"])["path"], "group": a["group"]}
+            {
+                "target": decode(a["target"])["path"],
+                "keeper": decode(a["keeper"])["path"],
+                "group": a["group"],
+                "reason": a["reason"],
+            }
             for a in actions
         ],
     }
