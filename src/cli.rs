@@ -71,6 +71,9 @@ pub struct ScanCommon {
     /// Prefer the most recently modified member as keeper before native path order.
     #[arg(long)]
     pub prefer_newest: bool,
+    /// Treat empty files as eligible copies (by default they are reported, never acted on).
+    #[arg(long)]
+    pub include_empty: bool,
     /// Do not descend into other filesystems.
     #[arg(long)]
     pub one_file_system: bool,
@@ -125,7 +128,7 @@ pub struct BudgetArgs {
     /// Concurrent fingerprint readers.
     #[arg(long, default_value_t = 2, value_name = "N")]
     pub readers: usize,
-    /// Maximum simultaneously open file descriptors.
+    /// Maximum open file descriptors, enforced as the process RLIMIT_NOFILE soft limit.
     #[arg(long, default_value_t = 32, value_name = "N")]
     pub descriptors: usize,
     /// Maximum scratch database size.

@@ -1,6 +1,8 @@
-use crate::error::{io, Result};
-use crate::fileinfo::{ensure_stable, open_observed};
+use crate::error::{io, Error, Result};
+use crate::fileinfo::{ensure_stable, open_expected, open_observed};
+use crate::model::Observation;
 use crate::scheduler::Cancellation;
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -13,11 +15,53 @@ pub fn equal(
     buffer_bytes: usize,
     cancel: &Cancellation,
 ) -> Result<(bool, u64)> {
-    let (mut left, left_before) = open_observed(a)?;
-    let (mut right, right_before) = open_observed(b)?;
+    let (left, left_before) = open_observed(a)?;
+    let (right, right_before) = open_observed(b)?;
     if left_before.size != right_before.size {
         return Ok((false, 0));
     }
+    compare_open(
+        (a, left, &left_before),
+        (b, right, &right_before),
+        buffer_bytes,
+        cancel,
+    )
+}
+
+/// Like [`equal`], for two objects of one size class that must still be exactly as
+/// inventoried. A change since inventory (including a size change) is an
+/// [`crate::Error::Unstable`] error, never a "different" verdict.
+pub fn equal_expected(
+    a: (&Path, &Observation),
+    b: (&Path, &Observation),
+    buffer_bytes: usize,
+    cancel: &Cancellation,
+) -> Result<(bool, u64)> {
+    if a.1.size != b.1.size {
+        // Different inventoried sizes: different content, without reading.
+        return Ok((false, 0));
+    }
+    let (left, left_before) = open_expected(a.0, a.1)?;
+    let (right, right_before) = open_expected(b.0, b.1)?;
+    if left_before.size != right_before.size {
+        return Err(Error::Unstable(
+            "objects of one size class differ in size".into(),
+        ));
+    }
+    compare_open(
+        (a.0, left, &left_before),
+        (b.0, right, &right_before),
+        buffer_bytes,
+        cancel,
+    )
+}
+
+fn compare_open(
+    (a, mut left, left_before): (&Path, File, &Observation),
+    (b, mut right, right_before): (&Path, File, &Observation),
+    buffer_bytes: usize,
+    cancel: &Cancellation,
+) -> Result<(bool, u64)> {
     let half = (buffer_bytes / 2).max(4096);
     let mut a_buf = vec![0; half];
     let mut b_buf = vec![0; half];
@@ -34,8 +78,8 @@ pub fn equal(
             break true;
         }
     };
-    ensure_stable(a, &left_before, &left)?;
-    ensure_stable(b, &right_before, &right)?;
+    ensure_stable(a, left_before, &left)?;
+    ensure_stable(b, right_before, &right)?;
     Ok((equal, total))
 }
 

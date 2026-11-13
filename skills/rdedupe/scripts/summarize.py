@@ -58,6 +58,7 @@ def scan(records):
         "groups": metrics["groups"],
         "symlinks_skipped": metrics["symlinks_skipped"],
         "special_files_skipped": metrics["special_files_skipped"],
+        "owned_dirs_skipped": metrics["owned_dirs_skipped"],
         "eligible_copies": metrics["eligible_copies"],
         "logical_redundant_bytes": metrics["logical_redundant_bytes"],
         "estimated_allocated_bytes": metrics["estimated_allocated_bytes"],

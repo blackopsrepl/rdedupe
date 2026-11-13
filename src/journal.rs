@@ -5,6 +5,12 @@
 //! that may have started. Recovery never trusts the journal alone: it reconciles each
 //! recorded action against the actual filesystem (see [`crate::recovery`]).
 //!
+//! Every record carries a `seal`: a keyed BLAKE3 (under the user's private key, see
+//! [`crate::keys`]) over the previous record's seal and this record. The chain rejects
+//! records that were edited, inserted, removed or reordered by anyone without the key, so
+//! `restore` and `purge` only act on journals this user's rdedupe wrote. Paths in sealed
+//! records are still validated before use.
+//!
 //! A final line without a terminating newline is a record that was being written when the
 //! process stopped; it is ignored and reported. Any other malformed line is corruption and
 //! stops every operation on the journal.
@@ -51,6 +57,20 @@ pub struct JournalEntry {
     pub target_observation: Observation,
     pub bytes_completed: u64,
     pub message: Option<String>,
+    /// Chained keyed seal; see the module documentation. Set by [`Journal::append`].
+    #[serde(default)]
+    pub seal: String,
+}
+
+const SEAL_DOMAIN: &str = "rdedupe-journal-v1";
+
+fn seal_entry(key: &[u8; 32], previous: &str, entry: &JournalEntry) -> Result<String> {
+    let mut unsealed = entry.clone();
+    unsealed.seal = String::new();
+    let mut data = previous.as_bytes().to_vec();
+    data.push(b'\n');
+    data.extend(serde_json::to_vec(&unsealed)?);
+    Ok(crate::keys::seal(key, SEAL_DOMAIN, &data))
 }
 
 /// Deterministic fault-injection seam for tests: called after every record is durable.
@@ -71,6 +91,8 @@ pub struct Journal {
     initial_len: u64,
     /// Opening found and removed a torn final record.
     dropped_torn_tail: bool,
+    key: [u8; 32],
+    last_seal: String,
 }
 
 impl Journal {
@@ -89,6 +111,8 @@ impl Journal {
             next: 1,
             initial_len: 0,
             dropped_torn_tail: false,
+            key: crate::keys::load_or_create()?,
+            last_seal: String::new(),
         })
     }
 
@@ -101,8 +125,10 @@ impl Journal {
             .map_err(|e| io("open journal", path, e))?;
         crate::platform::lock_exclusive(&file, path)?;
         let mut next = 1;
+        let mut last_seal = String::new();
         let tail = for_each(path, |entry| {
-            next = next.max(entry.sequence + 1);
+            next = entry.sequence + 1;
+            last_seal = entry.seal.clone();
             Ok(())
         })?;
         let journal = Self {
@@ -111,6 +137,8 @@ impl Journal {
             next,
             initial_len: tail.valid_bytes,
             dropped_torn_tail: tail.truncated_tail,
+            key: crate::keys::existing()?,
+            last_seal,
         };
         if tail.truncated_tail {
             // A torn final record was being written when the process stopped. Records are
@@ -128,7 +156,7 @@ impl Journal {
     pub fn append(&mut self, mut entry: JournalEntry, hooks: &dyn JournalHooks) -> Result<()> {
         entry.schema = SCHEMA.into();
         entry.sequence = self.next;
-        self.next += 1;
+        entry.seal = seal_entry(&self.key, &self.last_seal, &entry)?;
         let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
         self.file
@@ -137,6 +165,8 @@ impl Journal {
         self.file
             .sync_all()
             .map_err(|e| io("sync journal", &self.path, e))?;
+        self.next += 1;
+        self.last_seal = entry.seal.clone();
         hooks.after_sync(&entry)
     }
 
@@ -183,6 +213,8 @@ pub fn for_each_limited(
     let mut line = Vec::new();
     let mut tail = Tail::default();
     let mut number = 0u64;
+    let mut key: Option<[u8; 32]> = None;
+    let mut previous = String::new();
     loop {
         line.clear();
         let read = reader
@@ -209,6 +241,24 @@ pub fn for_each_limited(
                 entry.schema
             )));
         }
+        if entry.sequence != tail.records + 1 {
+            return Err(Error::Journal(format!(
+                "record on line {number} has sequence {} (expected {})",
+                entry.sequence,
+                tail.records + 1
+            )));
+        }
+        let key = match key {
+            Some(key) => key,
+            None => *key.insert(crate::keys::existing()?),
+        };
+        let expected = seal_entry(&key, &previous, &entry)?;
+        if !crate::keys::verify_hex(&expected, &entry.seal) {
+            return Err(Error::Journal(format!(
+                "record on line {number} fails its seal: the journal was edited, or was not written by this user"
+            )));
+        }
+        previous = entry.seal.clone();
         tail.records += 1;
         f(&entry)?;
     }

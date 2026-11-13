@@ -37,6 +37,7 @@ fn unresolved(store: &Store, record: &FileRecord, operation: &str, message: Stri
 pub fn establish_groups(store: &Store, options: &Options<'_>, metrics: &mut Metrics) -> Result<()> {
     store.begin()?;
     fingerprint_candidates(store, options, metrics)?;
+    refine_buckets(store, options, metrics)?;
     compare_buckets(store, options, metrics)?;
     store.commit()?;
     store.renumber_groups()
@@ -80,9 +81,12 @@ fn fingerprint_candidates(
                     budget.readers,
                     budget.buffer_bytes,
                     |record, buffer| {
-                        options
-                            .fingerprinter
-                            .fingerprint(&record.path, buffer, options.cancel)
+                        options.fingerprinter.fingerprint(
+                            &record.path,
+                            &record.observation,
+                            buffer,
+                            options.cancel,
+                        )
                     },
                 );
                 for (record, result) in todo.iter().zip(results) {
@@ -100,6 +104,58 @@ fn fingerprint_candidates(
             }
         }
         last_size = Some(tail);
+    }
+}
+
+/// Splits every sampled-digest bucket with more than two members by full-content digest,
+/// so N files that collide on their samples cost N extra reads rather than up to N²
+/// comparisons. Buckets of two go straight to one byte comparison, which is cheaper.
+fn refine_buckets(store: &Store, options: &Options<'_>, metrics: &mut Metrics) -> Result<()> {
+    let budget = options.budget;
+    let mut last_digest: Option<Vec<u8>> = None;
+    loop {
+        let digests = store.sampled_buckets_after(2, last_digest.as_deref())?;
+        let Some(tail) = digests.last().cloned() else {
+            return Ok(());
+        };
+        for digest in digests {
+            let mut last_path: Option<Vec<u8>> = None;
+            loop {
+                options.cancel.check()?;
+                let page = store.sampled_bucket_after(&digest, last_path.as_deref())?;
+                let Some(last) = page.last() else {
+                    break;
+                };
+                last_path = Some(path_bytes(&last.path).to_vec());
+                let results = bounded_map(
+                    &page,
+                    budget.readers,
+                    budget.buffer_bytes,
+                    |record, buffer| {
+                        options.fingerprinter.refine(
+                            &record.path,
+                            &record.observation,
+                            buffer,
+                            options.cancel,
+                        )
+                    },
+                );
+                for (record, result) in page.iter().zip(results) {
+                    match result {
+                        Ok((refined, bytes)) => {
+                            metrics.full_hash_bytes_read += bytes;
+                            store.set_refined(record, &refined)?;
+                        }
+                        Err(Error::Cancelled) => return Err(Error::Cancelled),
+                        Err(error) => {
+                            store.remove_fingerprint(record)?;
+                            unresolved(store, record, "fingerprint", error.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+        last_digest = Some(tail);
     }
 }
 
@@ -150,9 +206,9 @@ fn classify(
         };
         for (class_id, representative) in representatives {
             options.cancel.check()?;
-            match compare::equal(
-                &representative.path,
-                &record.path,
+            match compare::equal_expected(
+                (&representative.path, &representative.observation),
+                (&record.path, &record.observation),
                 options.budget.buffer_bytes,
                 options.cancel,
             ) {

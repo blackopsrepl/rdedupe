@@ -4,6 +4,7 @@
 mod support;
 
 use std::collections::BTreeSet;
+use std::os::unix::ffi::OsStrExt;
 use support::*;
 
 fn all_files(fixture: &Fixture) -> BTreeSet<(Vec<u8>, Vec<u8>)> {
@@ -33,9 +34,15 @@ fn full_pipeline_removes_exactly_the_eligible_copies_and_restores_them() {
         seeded_tree(&fixture, seed, 150);
         let before = all_files(&fixture);
         let expected_groups = oracle(&[fixture.root()]);
-        // Expected survivors: every non-group file plus the smallest path of each group.
+        // Expected survivors: every non-group file, the smallest path of each group, and
+        // every member of an empty-file group (retained by default).
         let removed: BTreeSet<Vec<u8>> = expected_groups
             .iter()
+            .filter(|g| {
+                let first = g.iter().next().unwrap();
+                let path = std::path::Path::new(std::ffi::OsStr::from_bytes(first));
+                std::fs::metadata(path).unwrap().len() > 0
+            })
             .flat_map(|g| g.iter().skip(1).cloned())
             .collect();
 
@@ -75,10 +82,20 @@ fn full_pipeline_removes_exactly_the_eligible_copies_and_restores_them() {
         let contents_before: BTreeSet<&Vec<u8>> = before.iter().map(|(_, c)| c).collect();
         let contents_after: BTreeSet<&Vec<u8>> = after.iter().map(|(_, c)| c).collect();
         assert_eq!(contents_before, contents_after, "no content lost");
-        assert!(oracle(&[fixture.root()]).is_empty(), "no duplicates remain");
-        let rescan = scan_jsonl([fixture.root()]);
+        // Only empty-file groups remain (retained by default), and the quarantine is not
+        // rescanned, so a rescan reports exactly those.
+        let remaining = oracle(&[fixture.root()]);
         assert!(
-            machine_groups(&rescan).is_empty(),
+            remaining.iter().all(|g| g.iter().all(|p| {
+                let path = std::path::Path::new(std::ffi::OsStr::from_bytes(p));
+                std::fs::metadata(path).unwrap().len() == 0
+            })),
+            "no non-empty duplicates remain"
+        );
+        let rescan = scan_jsonl([fixture.root()]);
+        assert_eq!(
+            machine_groups(&rescan),
+            remaining,
             "quarantine is not rescanned"
         );
 

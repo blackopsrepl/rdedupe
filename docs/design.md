@@ -46,13 +46,21 @@ discover → size classes → fingerprints → exact comparison → groups → a
   Owned artifacts (scratch workspace, cache file, quarantine directories carrying a valid
   marker) are excluded by exact path, never by name pattern.
 - **Size elimination** (`src/store.rs`, `src/candidates.rs`): objects whose size is unique
-  are never opened. Empty files are candidates like any other size.
+  are never opened. Empty files are grouped like any other size, but the policy retains
+  every empty non-keeper unless `--include-empty` is given, so plans never act on them.
 - **Fingerprints** (`src/fingerprint.rs`): BLAKE3 over the layout name, the size and three
   fixed 64 KiB windows (start, middle, end), read in buffer-sized chunks; small files are
   read once. Readers run in a bounded pool (`src/scheduler.rs`), each owning one buffer.
-- **Exact comparison** (`src/compare.rs`): inside each fingerprint bucket, each object is
-  compared with one representative of every equality class found so far, so a bucket
-  holding several distinct contents (a collision) still yields separate, exact groups.
+- **Refinement** (`src/candidates.rs`): a sampled-digest bucket with more than two members
+  is split by a streamed full-content BLAKE3 before any comparison, so N files that agree
+  on every sampled window but differ elsewhere cost N reads, not up to N² comparisons. A
+  bucket of two goes straight to one comparison, which reads the same bytes.
+- **Exact comparison** (`src/compare.rs`): inside each bucket, each object is compared
+  with one representative of every equality class found so far, so a bucket holding
+  several distinct contents (a collision) still yields separate, exact groups. Every open
+  for fingerprinting, refinement and comparison checks the object against its inventory
+  observation (identity, size, mtime, ctime); an object that changed after discovery is
+  unresolved and makes the scan partial, never "unique".
   Reads retry short and interrupted reads; a short read is never taken for a difference.
 - **Accounting** (`src/accounting.rs`) counts paths, objects, aliases, groups,
   participants, eligible copies, logical redundant bytes and allocated bytes of
@@ -73,7 +81,8 @@ journal).
   at least 2 MiB;
 - descriptors: 13 fixed (3 stdio, 1 output file, 4 for the SQLite database, WAL,
   shared memory and temporary file, 2 comparison inputs, 2 walker directory handles,
-  1 directory handle for `fsync`) + one per reader, checked against `--descriptors`;
+  1 directory handle for `fsync`) + one per reader, checked against `--descriptors` and
+  enforced by lowering the process `RLIMIT_NOFILE` soft limit to it;
 - disk: SQLite `max_page_count` from `--temp-mib`; exhaustion fails the scan with an
   explicit error and the workspace is still removed.
 

@@ -88,6 +88,45 @@ pub fn create_unique_dir(base: &Path, prefix: &str) -> Result<std::path::PathBuf
 }
 
 /// Returns whether a directory entry exists at `path` without following a final symlink.
+/// Lowers this process's open-descriptor limit (the `RLIMIT_NOFILE` soft limit) to `max`,
+/// so a descriptor budget is enforced by the kernel rather than only estimated. Never
+/// raises the limit.
+pub fn limit_open_files(max: usize) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit/setrlimit only read and write the struct passed by pointer.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+            return Err(io(
+                "read descriptor limit",
+                "",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let wanted = max as libc::rlim_t;
+        if limit.rlim_cur > wanted {
+            limit.rlim_cur = wanted;
+            // SAFETY: as above.
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+                return Err(io(
+                    "set descriptor limit",
+                    "",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = max;
+        Ok(())
+    }
+}
+
 pub fn entry_exists(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),

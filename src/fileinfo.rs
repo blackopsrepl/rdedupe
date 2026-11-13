@@ -39,6 +39,24 @@ fn open_regular(path: &Path, write: bool) -> Result<(File, Observation)> {
     Ok((file, platform::observation(&metadata)))
 }
 
+/// Opens `path` and requires the object to be the one inventoried: same identity, size,
+/// modification and change time. Anything else changed after discovery and must become
+/// unresolved instead of being treated as unique or compared on stale assumptions.
+pub fn open_expected(path: &Path, expected: &Observation) -> Result<(File, Observation)> {
+    let (file, now) = open_observed(path)?;
+    if now.identity != expected.identity
+        || now.size != expected.size
+        || now.modified_ns != expected.modified_ns
+        || now.changed_ns != expected.changed_ns
+    {
+        return Err(Error::Unstable(format!(
+            "{} changed after it was inventoried",
+            crate::paths::display_path(path)
+        )));
+    }
+    Ok((file, now))
+}
+
 pub fn ensure_stable(path: &Path, before: &Observation, file: &File) -> Result<()> {
     let after = platform::observe_file(file).map_err(|e| io("fstat", path, e))?;
     if &after != before {

@@ -42,8 +42,8 @@ fn each_member(scan: &ScanResult, mut f: impl FnMut(&Member<'_>) -> Result<()>) 
             let protected = scan.policy.is_protected(&record.path);
             let reason = if is_keeper {
                 format!("keeper: {keeper_reason}")
-            } else if protected {
-                "retained: protected root".into()
+            } else if let Some(why) = scan.policy.retained_because(record) {
+                format!("retained: {why}")
             } else {
                 format!("eligible copy of {}", display_path(&keeper.path))
             };
@@ -103,8 +103,11 @@ fn write_human(scan: &ScanResult, out: &mut impl Write) -> Result<()> {
     )?;
     writeln!(
         out,
-        "reads: {} fingerprint bytes, {} comparison bytes; {} objects eliminated by size without reading",
-        metrics.fingerprint_bytes_read, metrics.comparison_bytes_read, metrics.eliminated_by_size
+        "reads: {} fingerprint bytes, {} full-content bytes, {} comparison bytes; {} objects eliminated by size without reading",
+        metrics.fingerprint_bytes_read,
+        metrics.full_hash_bytes_read,
+        metrics.comparison_bytes_read,
+        metrics.eliminated_by_size
     )?;
     if summary.unresolved > 0 {
         writeln!(out, "\n{} unresolved paths:", summary.unresolved)?;

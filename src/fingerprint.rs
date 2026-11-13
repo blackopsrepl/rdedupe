@@ -1,6 +1,7 @@
 use crate::compare::fill;
 use crate::error::{io, Error, Result};
-use crate::fileinfo::{ensure_stable, open_observed};
+use crate::fileinfo::{ensure_stable, open_expected};
+use crate::model::Observation;
 use crate::scheduler::Cancellation;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
@@ -8,15 +9,31 @@ use std::path::Path;
 /// Identifier of the sampling layout; part of every fingerprint and of the cache format.
 pub const LAYOUT: &str = "blake3-sample-layout-v1";
 
-/// Computes a candidate-partitioning fingerprint. Fingerprints only ever *separate*
-/// candidates; equal fingerprints are always followed by a complete byte comparison.
+/// Computes candidate-partitioning digests. Digests only ever *separate* candidates; equal
+/// digests are always followed by a complete byte comparison. Both methods must fail with
+/// [`Error::Unstable`] when the object no longer matches its inventory observation.
 pub trait Fingerprinter: Sync {
+    /// Cheap sampled digest used for every same-size candidate.
     fn fingerprint(
         &self,
         path: &Path,
+        expected: &Observation,
         buffer: &mut [u8],
         cancel: &Cancellation,
     ) -> Result<([u8; 32], u64)>;
+
+    /// Full-content digest used to split a sampled-digest bucket with more than two
+    /// members before byte comparison, so files that differ only in unsampled bytes cost
+    /// one extra read each instead of one comparison per equality class.
+    fn refine(
+        &self,
+        path: &Path,
+        expected: &Observation,
+        buffer: &mut [u8],
+        cancel: &Cancellation,
+    ) -> Result<([u8; 32], u64)> {
+        full_digest(path, expected, buffer, cancel)
+    }
 }
 
 /// Bytes in each sampled window. Fixed by the layout so fingerprints never depend on the
@@ -33,10 +50,11 @@ impl Fingerprinter for Blake3Fingerprinter {
     fn fingerprint(
         &self,
         path: &Path,
+        expected: &Observation,
         buffer: &mut [u8],
         cancel: &Cancellation,
     ) -> Result<([u8; 32], u64)> {
-        let (mut file, before) = open_observed(path)?;
+        let (mut file, before) = open_expected(path, expected)?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(LAYOUT.as_bytes());
         hasher.update(&before.size.to_le_bytes());
@@ -73,18 +91,58 @@ impl Fingerprinter for Blake3Fingerprinter {
     }
 }
 
-/// Test seam: maps every file to the same fingerprint, forcing every same-size candidate
-/// into one bucket so that only complete comparison can separate equality classes.
+/// BLAKE3 of the complete content, streamed through `buffer`.
+pub fn full_digest(
+    path: &Path,
+    expected: &Observation,
+    buffer: &mut [u8],
+    cancel: &Cancellation,
+) -> Result<([u8; 32], u64)> {
+    let (mut file, before) = open_expected(path, expected)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rdedupe-full-content-v1");
+    let mut read_bytes = 0u64;
+    loop {
+        cancel.check()?;
+        let filled = fill(&mut file, buffer).map_err(|e| io("read", path, e))?;
+        hasher.update(&buffer[..filled]);
+        read_bytes += filled as u64;
+        if filled < buffer.len() {
+            break;
+        }
+    }
+    if read_bytes != before.size {
+        return Err(Error::Unstable(format!(
+            "{path:?} changed size while being read"
+        )));
+    }
+    ensure_stable(path, &before, &file)?;
+    Ok((*hasher.finalize().as_bytes(), read_bytes))
+}
+
+/// Test seam: maps every file to the same digests, forcing every same-size candidate into
+/// one bucket so that only complete comparison can separate equality classes.
 pub struct CollisionFingerprinter;
 
 impl Fingerprinter for CollisionFingerprinter {
     fn fingerprint(
         &self,
         path: &Path,
+        expected: &Observation,
         _buffer: &mut [u8],
         _cancel: &Cancellation,
     ) -> Result<([u8; 32], u64)> {
-        open_observed(path)?;
+        open_expected(path, expected)?;
         Ok(([0; 32], 0))
+    }
+
+    fn refine(
+        &self,
+        path: &Path,
+        expected: &Observation,
+        buffer: &mut [u8],
+        cancel: &Cancellation,
+    ) -> Result<([u8; 32], u64)> {
+        self.fingerprint(path, expected, buffer, cancel)
     }
 }

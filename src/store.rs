@@ -108,8 +108,9 @@ impl Store {
              CREATE INDEX files_candidates ON files(size, alias_of, path);
              CREATE TABLE unresolved (id INTEGER PRIMARY KEY, path BLOB NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL, retry_safe INTEGER NOT NULL);
              CREATE INDEX unresolved_order ON unresolved(path, id);
-             CREATE TABLE fingerprints (file_id INTEGER PRIMARY KEY, digest BLOB NOT NULL, path BLOB NOT NULL);
+             CREATE TABLE fingerprints (file_id INTEGER PRIMARY KEY, digest BLOB NOT NULL, refined BLOB NOT NULL, path BLOB NOT NULL);
              CREATE INDEX fingerprints_bucket ON fingerprints(digest, path);
+             CREATE INDEX fingerprints_refined ON fingerprints(refined, path);
              CREATE TABLE cache_entries (path BLOB PRIMARY KEY, device INTEGER NOT NULL, inode INTEGER NOT NULL, size INTEGER NOT NULL, modified_ns TEXT NOT NULL, changed_ns TEXT NOT NULL, digest BLOB NOT NULL);
              CREATE TABLE comparison_classes (class_id INTEGER NOT NULL, file_id INTEGER NOT NULL UNIQUE, representative INTEGER NOT NULL, path BLOB NOT NULL);
              CREATE INDEX comparison_reps ON comparison_classes(representative, class_id);
@@ -290,16 +291,71 @@ impl Store {
 
     pub fn put_fingerprint(&self, record: &FileRecord, digest: &[u8; 32]) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO fingerprints(file_id,digest,path) VALUES(?1,?2,?3)",
+            "INSERT OR REPLACE INTO fingerprints(file_id,digest,refined,path) VALUES(?1,?2,?2,?3)",
             params![record.id, &digest[..], path_bytes(&record.path)],
         )?;
         self.wrote()
     }
 
-    /// Fingerprints shared by more than one object, ascending, after `after`.
+    /// Sampled digests shared by more than `min_members` objects, ascending, after `after`.
+    pub fn sampled_buckets_after(
+        &self,
+        min_members: u64,
+        after: Option<&[u8]>,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT digest FROM fingerprints WHERE digest > ?1 GROUP BY digest HAVING COUNT(*) > ?2 ORDER BY digest LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(
+                params![after.unwrap_or(&[]), min_members as i64, PAGE as i64],
+                |r| r.get(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Members of one sampled-digest bucket in native path order, after `after`.
+    pub fn sampled_bucket_after(
+        &self,
+        digest: &[u8],
+        after: Option<&[u8]>,
+    ) -> Result<Vec<FileRecord>> {
+        let sql = format!(
+            "SELECT {RECORD_COLUMNS} FROM fingerprints JOIN files ON files.id = fingerprints.file_id WHERE fingerprints.digest=?1 AND fingerprints.path > ?2 ORDER BY fingerprints.path LIMIT ?3"
+        );
+        let mut statement = self.conn.prepare_cached(&sql)?;
+        let rows = statement
+            .query_map(
+                params![digest, after.unwrap_or(&[]), PAGE as i64],
+                record_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Replaces a candidate's comparison bucket key with a refined (full-content) digest.
+    pub fn set_refined(&self, record: &FileRecord, refined: &[u8; 32]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE fingerprints SET refined=?2 WHERE file_id=?1",
+            params![record.id, &refined[..]],
+        )?;
+        self.wrote()
+    }
+
+    /// Withdraws a candidate from comparison (it became unresolved).
+    pub fn remove_fingerprint(&self, record: &FileRecord) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM fingerprints WHERE file_id=?1",
+            params![record.id],
+        )?;
+        self.wrote()
+    }
+
+    /// Comparison buckets (refined digests) shared by more than one object, after `after`.
     pub fn colliding_digests_after(&self, after: Option<&[u8]>) -> Result<Vec<Vec<u8>>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT digest FROM fingerprints WHERE digest > ?1 GROUP BY digest HAVING COUNT(*) > 1 ORDER BY digest LIMIT ?2",
+            "SELECT refined FROM fingerprints WHERE refined > ?1 GROUP BY refined HAVING COUNT(*) > 1 ORDER BY refined LIMIT ?2",
         )?;
         let rows = statement
             .query_map(params![after.unwrap_or(&[]), PAGE as i64], |r| r.get(0))?
@@ -307,10 +363,10 @@ impl Store {
         Ok(rows)
     }
 
-    /// Members of one fingerprint bucket in native path order, after `after`.
+    /// Members of one comparison bucket in native path order, after `after`.
     pub fn bucket_after(&self, digest: &[u8], after: Option<&[u8]>) -> Result<Vec<FileRecord>> {
         let sql = format!(
-            "SELECT {RECORD_COLUMNS} FROM fingerprints JOIN files ON files.id = fingerprints.file_id WHERE fingerprints.digest=?1 AND fingerprints.path > ?2 ORDER BY fingerprints.path LIMIT ?3"
+            "SELECT {RECORD_COLUMNS} FROM fingerprints JOIN files ON files.id = fingerprints.file_id WHERE fingerprints.refined=?1 AND fingerprints.path > ?2 ORDER BY fingerprints.path LIMIT ?3"
         );
         let mut statement = self.conn.prepare_cached(&sql)?;
         let rows = statement

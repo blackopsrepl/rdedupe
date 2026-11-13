@@ -114,8 +114,8 @@ fn corrupt_or_foreign_caches_are_ignored_and_replaced() {
     let a = fixture.write("a", b"same");
     let b = fixture.write("b", b"same");
     for garbage in [
-        &b"not json at all"[..],
-        b"{\"schema\":\"rdedupe-cache-v1\",\"layout\":\"x\",\"authority\":\"\"}\n",
+        &b"{\"schema\":\"rdedupe-cache-v1\",\"layout\":\"x\",\"authority\":\"\"}\n"[..],
+        b"{\"schema\":\"rdedupe-cache-v2\",\"layout\":\"other-layout\",\"authority\":\"\"}\n",
     ] {
         std::fs::write(&cache, garbage).unwrap();
         let result = scan(fixture.root(), &cache, true, false);
@@ -169,4 +169,62 @@ fn cache_inside_the_scanned_tree_is_never_inventoried_and_writes_are_atomic() {
         .filter(|n| n.to_string_lossy().contains(".tmp-"))
         .collect();
     assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// `--cache` must never destroy a file that is not an rdedupe cache: a source file, a
+/// symlink, a directory or a hard-linked alias is refused before scanning and left intact.
+#[test]
+fn cache_path_that_is_not_a_cache_is_refused_and_untouched() {
+    let fixture = Fixture::new();
+    let work = Fixture::new();
+    fixture.write("a", b"same");
+    fixture.write("b", b"same");
+    let precious = fixture.write("important.txt", b"precious only copy");
+    let mut config = scan_config(&[fixture.root()], Budget::default());
+    config.cache = Some(precious.clone());
+    let Err(error) = rdedupe::scan(config, Policy::default(), &Cancellation::default()) else {
+        panic!("a user file is not a cache");
+    };
+    assert!(error.to_string().contains("refusing --cache"), "{error}");
+    assert_eq!(std::fs::read(&precious).unwrap(), b"precious only copy");
+
+    // A real cache that gained a second name is an alias of data now: refused.
+    let cache = work.path("c");
+    scan(fixture.root(), &cache, false, false);
+    let alias = work.path("alias");
+    std::fs::hard_link(&cache, &alias).unwrap();
+    let mut config = scan_config(&[fixture.root()], Budget::default());
+    config.cache = Some(cache.clone());
+    assert!(rdedupe::scan(config, Policy::default(), &Cancellation::default()).is_err());
+    std::fs::remove_file(&alias).unwrap();
+
+    #[cfg(unix)]
+    {
+        let link = work.path("link");
+        std::os::unix::fs::symlink(&precious, &link).unwrap();
+        let mut config = scan_config(&[fixture.root()], Budget::default());
+        config.cache = Some(link);
+        assert!(rdedupe::scan(config, Policy::default(), &Cancellation::default()).is_err());
+        assert_eq!(std::fs::read(&precious).unwrap(), b"precious only copy");
+    }
+    let directory = work.path("dir");
+    std::fs::create_dir(&directory).unwrap();
+    let mut config = scan_config(&[fixture.root()], Budget::default());
+    config.cache = Some(directory.clone());
+    assert!(rdedupe::scan(config, Policy::default(), &Cancellation::default()).is_err());
+    assert!(directory.is_dir());
+}
+
+#[test]
+fn cli_refuses_a_source_file_as_cache() {
+    let fixture = Fixture::new();
+    fixture.write("a", b"same");
+    fixture.write("b", b"same");
+    let precious = fixture.write("important.txt", b"precious only copy");
+    rdedupe()
+        .args(["scan", fixture.str(), "--cache"])
+        .arg(&precious)
+        .assert()
+        .code(4);
+    assert_eq!(std::fs::read(&precious).unwrap(), b"precious only copy");
 }

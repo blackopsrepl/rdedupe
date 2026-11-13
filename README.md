@@ -41,13 +41,15 @@ reads: 786432 fingerprint bytes, 7059456 comparison bytes; 40 objects eliminated
 - **Deterministic.** Output and keeper choice depend only on the files, never on traversal
   order, thread count or budget.
 - **Recoverable.** Changes go through a saved plan; every action is re-checked against the
-  filesystem immediately before it runs and is journaled durably first. Quarantine is a
+  filesystem immediately before it runs and is journaled durably first. Plans and journals
+  are sealed with a private per-user key, so an edited plan or journal is refused. Empty
+  files are reported but never acted on unless `--include-empty` is given. Quarantine is a
   rename within the same directory tree, so restore is exact and nothing is copied.
 
 ## Workflow
 
 ```console
-rdedupe scan /data                                         # report (never modifies anything)
+rdedupe scan /data                                         # report (modifies nothing)
 rdedupe plan /data --protect /data/originals --output cleanup.plan
 rdedupe apply --plan cleanup.plan --journal cleanup.journal   # quarantine the copies
 rdedupe restore --journal cleanup.journal                  # undo

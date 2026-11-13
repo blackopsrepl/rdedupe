@@ -43,7 +43,35 @@ fn identity_at(path: &Path) -> Result<Option<FileIdentity>> {
     }
 }
 
+/// Structural validation of a journal record's paths; journals are untrusted input even
+/// when sealed. Target and keeper must be distinct normalized absolute paths, and the
+/// quarantine path must be exactly the slot `apply` would have used for this action.
+fn validate_paths(entry: &JournalEntry) -> Result<()> {
+    let target = entry.target.to_path()?;
+    let keeper = entry.keeper.to_path()?;
+    for path in [&target, &keeper] {
+        if !crate::paths::is_normalized_absolute(path) {
+            return Err(Error::Journal(format!(
+                "action {} names a non-normalized path {}",
+                entry.action,
+                crate::paths::display_path(path)
+            )));
+        }
+    }
+    if target == keeper {
+        return Err(Error::Journal(format!(
+            "action {} names the same path as target and keeper",
+            entry.action
+        )));
+    }
+    if let Some(recorded) = &entry.quarantine {
+        crate::quarantine::validate_recorded(&target, &recorded.to_path()?, entry.action)?;
+    }
+    Ok(())
+}
+
 pub fn locate(entry: &JournalEntry) -> Result<Location> {
+    validate_paths(entry)?;
     let expected = entry.target_observation.identity;
     let target = identity_at(&entry.target.to_path()?)?;
     let quarantined = match &entry.quarantine {

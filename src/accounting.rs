@@ -16,7 +16,7 @@ pub fn finish(store: &Store, policy: &Policy, metrics: &mut Metrics) -> Result<(
         metrics.groups += 1;
         store.for_each_member(group, |member| {
             metrics.participants += 1;
-            if member.id != keeper.id && !policy.is_protected(&member.path) {
+            if member.id != keeper.id && policy.retained_because(member).is_none() {
                 metrics.eligible_copies += 1;
                 metrics.logical_redundant_bytes += member.observation.size;
                 if member.observation.links == 1 {

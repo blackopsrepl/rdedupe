@@ -74,6 +74,9 @@ Recipes with exact prerequisites, side effects and stop conditions are in
 - A plan goes stale the moment files change. `apply` re-checks every action and skips stale ones; re-plan instead of editing a plan (edits are detected and rejected).
 - `--trust-cache` makes a scan heuristic: reports still show only byte-verified groups, but duplicates can be missed, and `plan` refuses it.
 - The quarantine lives next to each target, in `.rdedupe-quarantine/` directories marked with an `RDEDUPE-QUARANTINE` file. Do not move or edit them; restore and purge find objects by the paths in the journal.
+- Empty files are grouped but `retained: empty file` by default; only `--include-empty` (on both scan and plan) makes them actionable. Do not add it unless the user asked to remove empty duplicates.
+- Plans and journals are sealed with the user's key in the rdedupe state directory. Run `apply`, `restore`, `purge` and `recover` as the same user with the same `RDEDUPE_STATE_DIR`/`XDG_STATE_HOME`/`HOME`, and never touch `seal.key`.
+- `--cache FILE` must be a new path or an existing rdedupe cache. Never point it at a user file; rdedupe refuses (exit 4) but the request was still wrong.
 
 ## Verification
 

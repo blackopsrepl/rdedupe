@@ -1,9 +1,11 @@
-//! Versioned, checksummed JSONL action plans.
+//! Versioned, checksummed and sealed JSONL action plans.
 //!
 //! Line 1 is a [`PlanHeader`], then one [`PlanAction`] per line in group/path order, then a
-//! [`PlanFooter`] with the action count and a BLAKE3 checksum over every preceding line.
-//! A checksum detects corruption; it does not authorize anything. `apply` re-validates
-//! every action against the current filesystem before touching it.
+//! [`PlanFooter`] with the action count, a BLAKE3 checksum over every preceding line, and a
+//! seal: a keyed BLAKE3 of the checksum under the user's private key ([`crate::keys`]). The
+//! checksum detects corruption; the seal rejects plans edited by anyone without the key.
+//! Neither replaces validation: every action is still checked structurally, and `apply`
+//! re-validates it against the current filesystem before touching anything.
 
 use crate::error::{io, Error, Result};
 use crate::model::{ActionKind, Completeness, Exactness, Observation};
@@ -28,6 +30,8 @@ pub struct PlanHeader {
     pub protect: Vec<EncodedPath>,
     pub prefer: Vec<EncodedPath>,
     pub prefer_newest: bool,
+    #[serde(default)]
+    pub include_empty: bool,
     pub completeness: Completeness,
     pub exactness: Exactness,
     pub action: ActionKind,
@@ -48,6 +52,18 @@ struct PlanFooter {
     schema: String,
     actions: u64,
     checksum: String,
+    seal: String,
+}
+
+const SEAL_DOMAIN: &str = "rdedupe-plan-v1";
+
+/// The seal for a plan whose checksum is `checksum_hex`, under this user's key.
+pub fn seal_for(checksum_hex: &str) -> Result<String> {
+    Ok(crate::keys::seal(
+        &crate::keys::load_or_create()?,
+        SEAL_DOMAIN,
+        checksum_hex.as_bytes(),
+    ))
 }
 
 /// Writes the plan for a complete, exact scan. Refuses partial, cancelled, failed or
@@ -81,6 +97,7 @@ pub fn write_plan(scan: &ScanResult, output: &Path, action: ActionKind) -> Resul
             .map(|p| EncodedPath::from_path(p))
             .collect(),
         prefer_newest: scan.policy.prefer_newest,
+        include_empty: scan.policy.include_empty,
         completeness: scan.summary.completeness.clone(),
         exactness: scan.summary.exactness,
         action,
@@ -98,7 +115,7 @@ pub fn write_plan(scan: &ScanResult, output: &Path, action: ActionKind) -> Resul
         scan.store.for_each_group(|group| {
             let (keeper, keeper_reason) = scan.policy.select_streaming(&scan.store, group)?;
             scan.store.for_each_member(group, |target| {
-                if target.id == keeper.id || scan.policy.is_protected(&target.path) {
+                if target.id == keeper.id || scan.policy.retained_because(target).is_some() {
                     return Ok(());
                 }
                 let item = PlanAction {
@@ -114,10 +131,12 @@ pub fn write_plan(scan: &ScanResult, output: &Path, action: ActionKind) -> Resul
                 Ok(())
             })
         })?;
+        let checksum = hash.finalize().to_hex().to_string();
         let footer = PlanFooter {
             schema: FOOTER_SCHEMA.into(),
             actions: count,
-            checksum: hash.finalize().to_hex().to_string(),
+            seal: seal_for(&checksum)?,
+            checksum,
         };
         serde_json::to_writer(&mut out, &footer)?;
         out.write_all(b"\n")?;
@@ -323,6 +342,16 @@ fn verify_from(reader: &mut impl BufRead, path: &Path) -> Result<(PlanHeader, Ve
     }
     if footer.checksum != hash.finalize().to_hex().as_str() {
         return Err(Error::Plan("plan checksum mismatch".into()));
+    }
+    if !crate::keys::verify(
+        &crate::keys::existing()?,
+        SEAL_DOMAIN,
+        footer.checksum.as_bytes(),
+        &footer.seal,
+    ) {
+        return Err(Error::Plan(
+            "plan seal mismatch: the plan was edited, or was not created by this user".into(),
+        ));
     }
     Ok((header, header_line, index))
 }

@@ -50,6 +50,7 @@ pub fn scan_with(
 ) -> Result<ScanResult> {
     config.budget.validate()?;
     config.roots = canonical_roots(&config.roots)?;
+    let cache_slot = config.cache.as_deref().map(cache::claim).transpose()?;
     let store = Store::create(&config.budget)?;
     let mut excluded = HashSet::new();
     excluded.insert(resolve_owned(store.workspace())?);
@@ -72,6 +73,7 @@ pub fn scan_with(
     let mut metrics = store.base_metrics(config.budget.page_cache_bytes())?;
     metrics.symlinks_skipped = counts.symlinks_skipped;
     metrics.special_files_skipped = counts.special_files_skipped;
+    metrics.owned_dirs_skipped = counts.owned_dirs_skipped;
     let progress = Progress {
         enabled: config.progress,
     };
@@ -117,10 +119,10 @@ pub fn scan_with(
         ),
     };
     let completeness = store.completeness()?;
-    if let (Some(path), Completeness::Complete | Completeness::Partial) =
-        (&config.cache, &completeness)
+    if let (Some(path), Some(slot), Completeness::Complete | Completeness::Partial) =
+        (&config.cache, cache_slot, &completeness)
     {
-        let written = cache::write(path, &store)?;
+        let written = cache::write(path, &store, slot)?;
         cache_provenance.push_str(&format!("; refreshed with {written} fingerprints"));
     }
     let unresolved = store.unresolved_count()?;
@@ -129,7 +131,9 @@ pub fn scan_with(
         completeness,
         metrics.groups,
         unresolved,
-        metrics.fingerprint_bytes_read + metrics.comparison_bytes_read
+        metrics.fingerprint_bytes_read
+            + metrics.full_hash_bytes_read
+            + metrics.comparison_bytes_read
     ));
     Ok(ScanResult {
         store,

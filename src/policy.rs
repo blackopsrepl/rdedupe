@@ -16,9 +16,24 @@ pub struct Policy {
     pub prefer: Vec<PathBuf>,
     /// Prefer the most recently modified member before falling back to native path order.
     pub prefer_newest: bool,
+    /// Make empty files eligible copies. Off by default: empty files are often meaningful
+    /// markers (`__init__.py`, `.gitkeep`, lock files) and removing them reclaims nothing.
+    #[serde(default)]
+    pub include_empty: bool,
 }
 
 impl Policy {
+    /// Why a non-keeper member is retained, or `None` when it is an eligible copy.
+    pub fn retained_because(&self, member: &FileRecord) -> Option<&'static str> {
+        if self.is_protected(&member.path) {
+            Some("protected root")
+        } else if member.observation.size == 0 && !self.include_empty {
+            Some("empty file (use --include-empty to act on empty files)")
+        } else {
+            None
+        }
+    }
+
     pub fn is_protected(&self, path: &Path) -> bool {
         self.protect.iter().any(|root| path.starts_with(root))
     }

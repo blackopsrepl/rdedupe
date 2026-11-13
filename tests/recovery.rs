@@ -427,3 +427,171 @@ fn unwritable_parent_refuses_the_move_without_side_effects() {
     assert_eq!(summary.quarantined, 0);
     assert_eq!(case.present(), vec!["a", "b", "c"]);
 }
+
+/// Renames the keeper away right after the first intent is durable: the move then happens,
+/// the post-move keeper check fails, and the target must be put back.
+struct MoveKeeperAway(PathBuf);
+
+impl JournalHooks for MoveKeeperAway {
+    fn after_sync(&self, entry: &JournalEntry) -> rdedupe::Result<()> {
+        if entry.sequence == 1 {
+            std::fs::rename(&self.0, self.0.with_extension("moved")).unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn keeper_vanishing_during_the_move_puts_the_target_back() {
+    let case = Case::new();
+    let mut outcomes = Vec::new();
+    let summary = rdedupe::delete::execute_with_hooks(
+        &case.plan(),
+        &case.journal(),
+        65_536,
+        &Cancellation::default(),
+        &MoveKeeperAway(case.fixture.path("a")),
+        |outcome| {
+            outcomes.push(outcome.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(summary.quarantined, 0);
+    assert_eq!(
+        outcomes[0].status,
+        rdedupe::model::ActionStatus::SkippedStale
+    );
+    assert!(outcomes[0]
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("moved back"));
+    assert_eq!(case.fixture.read("b"), CONTENT);
+    assert_eq!(case.fixture.read("c"), CONTENT);
+    assert!(!case.fixture.exists(".rdedupe-quarantine"));
+    let mut states = Vec::new();
+    rdedupe::journal::for_each(&case.journal(), |entry| {
+        states.push(entry.state);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            rdedupe::journal::State::Prepared,
+            rdedupe::journal::State::Restored
+        ]
+    );
+}
+
+/// Rewrites one journal line (as JSON) in place, keeping its seal.
+fn edit_journal_line(journal: &Path, index: usize, edit: impl FnOnce(&mut serde_json::Value)) {
+    let text = std::fs::read_to_string(journal).unwrap();
+    let mut lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    edit(&mut lines[index]);
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&serde_json::to_string(&line).unwrap());
+        out.push('\n');
+    }
+    std::fs::write(journal, out).unwrap();
+}
+
+#[test]
+fn edited_journals_are_refused_and_never_purge_other_files() {
+    let case = Case::new();
+    apply(&case.plan(), &case.journal());
+    let elsewhere = Fixture::new();
+    let victim = elsewhere.write("victim", CONTENT);
+    let identity = rdedupe::fileinfo::observe_path(&victim).unwrap().identity;
+    // The review's attack: point a quarantine path at an unrelated identical file.
+    edit_journal_line(&case.journal(), 0, |line| {
+        line["quarantine"] = encoded(&victim);
+        line["target_observation"]["identity"] = serde_json::to_value(identity).unwrap();
+    });
+    let error = rdedupe::recovery::purge(&case.journal(), 65_536, &Cancellation::default(), |_| {})
+        .expect_err("an edited journal is refused");
+    assert!(error.to_string().contains("seal"), "{error}");
+    assert!(rdedupe::recovery::restore(&case.journal(), |_| {}).is_err());
+    assert_eq!(std::fs::read(&victim).unwrap(), CONTENT);
+}
+
+#[test]
+fn sealed_records_naming_a_foreign_quarantine_path_are_refused() {
+    // Even a record sealed with the user's key is validated: its quarantine path must be
+    // exactly the slot apply uses for that action.
+    let case = Case::new();
+    let elsewhere = Fixture::new();
+    let victim = elsewhere.write("victim", CONTENT);
+    let observation = rdedupe::fileinfo::observe_path(&victim).unwrap();
+    let mut journal = rdedupe::journal::Journal::create(&case.journal()).unwrap();
+    journal
+        .append(
+            JournalEntry {
+                schema: String::new(),
+                sequence: 0,
+                action: 1,
+                group: 1,
+                state: rdedupe::journal::State::Committed,
+                kind: ActionKind::Quarantine,
+                target: rdedupe::paths::EncodedPath::from_path(&case.fixture.path("missing")),
+                keeper: rdedupe::paths::EncodedPath::from_path(&case.fixture.path("a")),
+                quarantine: Some(rdedupe::paths::EncodedPath::from_path(&victim)),
+                target_observation: observation,
+                bytes_completed: CONTENT.len() as u64,
+                message: None,
+                seal: String::new(),
+            },
+            &rdedupe::journal::NoHooks,
+        )
+        .unwrap();
+    drop(journal);
+    let error = rdedupe::recovery::purge(&case.journal(), 65_536, &Cancellation::default(), |_| {})
+        .expect_err("a foreign quarantine path is refused");
+    assert!(error.to_string().contains("quarantine"), "{error}");
+    assert_eq!(std::fs::read(&victim).unwrap(), CONTENT);
+}
+
+#[test]
+fn a_user_directory_named_like_the_quarantine_is_never_taken_over() {
+    let fixture = Fixture::new();
+    let user_dir = fixture.path(".rdedupe-quarantine");
+    std::fs::create_dir(&user_dir).unwrap();
+    std::fs::set_permissions(
+        &user_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    fixture.write(".rdedupe-quarantine/userfile", b"user data");
+    fixture.write("dup-a", CONTENT);
+    fixture.write("dup-b", CONTENT);
+    let work = Fixture::new();
+    let result = library_scan(&[fixture.root()], Policy::default());
+    let (summary, outcomes) = plan_and_apply(
+        &result,
+        &work.path("plan"),
+        &work.path("journal"),
+        ActionKind::Quarantine,
+    );
+    assert_eq!(summary.quarantined, 0);
+    assert_eq!(
+        outcomes[0].status,
+        rdedupe::model::ActionStatus::SkippedStale
+    );
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&user_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755, "permissions untouched");
+    assert!(
+        !user_dir.join("RDEDUPE-QUARANTINE").exists(),
+        "no marker written"
+    );
+    assert_eq!(fixture.read("dup-b"), CONTENT);
+    // The user's directory is still scanned like any other directory.
+    let rescan = library_scan(&[fixture.root()], Policy::default());
+    assert_eq!(rescan.summary.metrics.objects, 3);
+    assert_eq!(rescan.summary.metrics.owned_dirs_skipped, 0);
+}

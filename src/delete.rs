@@ -115,7 +115,18 @@ fn entry(number: u64, action: &PlanAction, kind: ActionKind, state: State) -> Jo
         target_observation: action.target_observation.clone(),
         bytes_completed: 0,
         message: None,
+        seal: String::new(),
     }
+}
+
+fn keeper_still_present(action: &PlanAction) -> Result<bool> {
+    let keeper = action.keeper.to_path()?;
+    Ok(match std::fs::symlink_metadata(&keeper) {
+        Ok(metadata) => {
+            crate::platform::observation(&metadata).identity == action.keeper_observation.identity
+        }
+        Err(_) => false,
+    })
 }
 
 fn quarantine_one(
@@ -142,6 +153,43 @@ fn quarantine_one(
     base.quarantine = Some(crate::paths::EncodedPath::from_path(&destination));
     journal.append(base.clone(), hooks)?;
     match quarantine::move_into(&target, &destination, action.target_observation.identity) {
+        Ok(()) if !keeper_still_present(action)? => {
+            // Another process removed or replaced the keeper between validation and the
+            // move (for example a concurrent apply of an opposite plan). Never leave the
+            // content with no live copy: move the target back.
+            let message = "keeper changed during apply; target moved back".to_string();
+            match crate::platform::rename_noreplace(&destination, &target) {
+                Ok(()) => {
+                    crate::platform::sync_parent(&target)?;
+                    quarantine::prune(&destination);
+                    let mut restored = base;
+                    restored.state = State::Restored;
+                    restored.message = Some(message.clone());
+                    journal.append(restored, hooks)?;
+                    Ok(outcome(
+                        action,
+                        ActionKind::Quarantine,
+                        ActionStatus::SkippedStale,
+                        0,
+                        Some(message),
+                    ))
+                }
+                Err(error) => {
+                    let message = format!("{message} failed: {error}");
+                    let mut failed = base;
+                    failed.state = State::Failed;
+                    failed.message = Some(message.clone());
+                    journal.append(failed, hooks)?;
+                    Ok(outcome(
+                        action,
+                        ActionKind::Quarantine,
+                        ActionStatus::Failed,
+                        0,
+                        Some(message),
+                    ))
+                }
+            }
+        }
         Ok(()) => {
             let size = action.target_observation.size;
             let mut applied = base.clone();

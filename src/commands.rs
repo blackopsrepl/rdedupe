@@ -80,6 +80,7 @@ fn legacy(cli: Cli, cancel: &Cancellation) -> Result<i32> {
         protect: vec![],
         prefer: vec![],
         prefer_newest: false,
+        include_empty: false,
         one_file_system: false,
         cache: None,
         trust_cache: false,
@@ -335,6 +336,7 @@ fn recover_command(args: RecoverArgs) -> Result<i32> {
 }
 
 fn run_scan(args: &ScanCommon, cancel: &Cancellation) -> Result<ScanResult> {
+    crate::platform::limit_open_files(args.budget.descriptors)?;
     let normalize = |items: &Vec<std::path::PathBuf>| {
         items
             .iter()
@@ -363,6 +365,7 @@ fn run_scan(args: &ScanCommon, cancel: &Cancellation) -> Result<ScanResult> {
             protect: normalize(&args.protect)?,
             prefer: normalize(&args.prefer)?,
             prefer_newest: args.prefer_newest,
+            include_empty: args.include_empty,
         },
         cancel,
     )

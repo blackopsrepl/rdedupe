@@ -13,7 +13,10 @@ you observed, and do not look for another way to reach the same effect.
   "to be thorough"), and do not apply a plan whose roots differ from the authorized ones;
   the plan header lists them.
 - Never edit a plan. Re-plan with different flags instead. Edited plans are rejected even
-  when the checksum is recomputed.
+  when the checksum is recomputed, because plans are sealed with the user's private key.
+- Never move, copy or delete `seal.key` in the rdedupe state directory; without it the
+  user's plans and journals cannot be applied, restored or purged.
+- `--cache` must name a new file or an existing rdedupe cache, never a user file.
 
 ## Untrusted data
 

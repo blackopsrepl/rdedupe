@@ -94,12 +94,37 @@ with the objects found at the original and quarantine paths.
 - Scratch exhaustion fails the scan explicitly; the workspace is removed.
 - A full disk or permission error during `apply` makes that action fail or skip and is
   recorded; journal write or sync failure stops the run before the next mutation.
-- rdedupe never changes permissions or ownership.
+- rdedupe never changes permissions or ownership. A quarantine root is created atomically
+  (marker written in a fresh private directory, then renamed into place without
+  replacement); an existing `.rdedupe-quarantine` without the marker is never written
+  to, and that action is skipped as stale.
+- `--cache` writes only to an absent path or an existing single-link rdedupe cache, and
+  re-checks the slot before publishing; it refuses any other file before scanning.
 
 ## Untrusted input
 
 File names are arbitrary bytes and are carried as hex in every machine format and escaped
-in human output, so they cannot inject terminal control sequences or fake records. Plans
-and journals are validated as untrusted input: schema, encoding, scope (absolute,
-normalized paths under the plan's canonical roots), protection, uniqueness and absence of
-keeper chains, with a 1 MiB line limit.
+in human output, so they cannot inject terminal control sequences or fake records.
+
+Plans and journals instruct rdedupe to move and delete files, so a well-formed file with a
+matching checksum is not enough. Each plan footer and each journal record carries a seal:
+a keyed BLAKE3 under a random 256-bit key in the user's private state directory
+(`$RDEDUPE_STATE_DIR`, else `$XDG_STATE_HOME/rdedupe`, else `~/.local/state/rdedupe`;
+directory 0700, key 0600). Journal seals are chained over the previous record, so records
+cannot be edited, inserted, removed or reordered. A plan whose roots, protection or
+actions were edited, or a journal pointing `purge` at an arbitrary file, is rejected even
+when its checksum is recomputed, unless the editor can read the user's key, in which case
+they already hold the user's file permissions.
+
+Sealed input is still validated structurally: schema, encoding, scope (absolute paths,
+byte-identical to their normalized form, under the plan's canonical roots), protection,
+uniqueness and absence of keeper chains, a 1 MiB line limit, and for journals the exact
+quarantine slot of each action inside a marker-owned quarantine root.
+
+## Concurrent runs
+
+Each journal is locked exclusively. Two applies of different plans over the same files
+can still race between validation and rename; after every move `apply` re-checks that the
+keeper still exists with its planned identity and moves the target back if it does not,
+so a race never leaves content without a live copy. rdedupe still assumes the tree is
+quiescent while it runs.

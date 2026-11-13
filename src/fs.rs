@@ -22,6 +22,8 @@ pub struct DiscoveryOptions<'a> {
 pub struct DiscoveryCounts {
     pub symlinks_skipped: u64,
     pub special_files_skipped: u64,
+    /// Marker-owned quarantine directories (and the owned artifacts above) not descended.
+    pub owned_dirs_skipped: u64,
 }
 
 /// Walks every root without following symlinks, in sorted native order, and records each
@@ -30,6 +32,7 @@ pub struct DiscoveryCounts {
 /// afterwards by [`Store::finalize_aliases`].
 pub fn discover(store: &Store, options: &DiscoveryOptions<'_>) -> Result<DiscoveryCounts> {
     let mut counts = DiscoveryCounts::default();
+    let owned_skipped = std::cell::Cell::new(0u64);
     store.begin()?;
     for root in options.roots {
         let root_device = observe_path(root).ok().map(|o| o.identity.device);
@@ -40,9 +43,13 @@ pub fn discover(store: &Store, options: &DiscoveryOptions<'_>) -> Result<Discove
             .sort_by_file_name()
             .into_iter()
             .filter_entry(|entry| {
-                !options.excluded.iter().any(|owned| entry.path() == owned)
-                    && !(entry.file_type().is_dir()
-                        && crate::quarantine::is_owned_quarantine_dir(entry.path()))
+                let owned = options.excluded.iter().any(|owned| entry.path() == owned)
+                    || (entry.file_type().is_dir()
+                        && crate::quarantine::is_owned_quarantine_dir(entry.path()));
+                if owned && entry.file_type().is_dir() {
+                    owned_skipped.set(owned_skipped.get() + 1);
+                }
+                !owned
             });
         for entry in walker {
             let entry = match entry {
@@ -91,6 +98,7 @@ pub fn discover(store: &Store, options: &DiscoveryOptions<'_>) -> Result<Discove
         }
     }
     store.finalize_aliases()?;
+    counts.owned_dirs_skipped = owned_skipped.get();
     Ok(counts)
 }
 

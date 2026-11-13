@@ -94,8 +94,23 @@ pub fn stable_cmp(a: &Path, b: &Path) -> std::cmp::Ordering {
     path_bytes(a).cmp(path_bytes(b))
 }
 
+/// Whether `path` is byte-identical to its normalized absolute form: no `.`/`..`
+/// components, no repeated or trailing separators. Imported paths must be, so that byte
+/// comparisons (uniqueness, keeper chains, scope) mean what they say.
+pub fn is_normalized_absolute(path: &Path) -> bool {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    let rebuilt: PathBuf = path.components().collect();
+    path_bytes(&rebuilt) == path_bytes(path)
+}
+
 pub fn validate_imported(path: &Path, roots: &[PathBuf]) -> Result<()> {
-    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+    if !is_normalized_absolute(path) {
         return Err(Error::Plan(format!(
             "path is not normalized absolute: {path:?}"
         )));

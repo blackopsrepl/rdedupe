@@ -13,6 +13,7 @@ pub mod fileinfo;
 pub mod fingerprint;
 pub mod fs;
 pub mod journal;
+pub mod keys;
 pub mod model;
 pub mod paths;
 pub mod pipeline;

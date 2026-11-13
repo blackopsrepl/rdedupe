@@ -12,7 +12,8 @@ filesystem supports it is only known when an extent action runs).
 
 ### `rdedupe scan ROOT...`
 
-Reports exact duplicate groups. Never modifies the scanned tree.
+Reports exact duplicate groups. Never modifies the scanned tree (with `--cache` it writes
+only the cache file).
 
 | Flag | Meaning |
 | --- | --- |
@@ -22,15 +23,16 @@ Reports exact duplicate groups. Never modifies the scanned tree.
 | `--protect DIR` | Never make members under DIR action targets (repeatable). Matches whole path components: `/data/keep` does not cover `/data/keeper`. |
 | `--prefer DIR` | Prefer keepers under DIR; earlier occurrences win (repeatable). |
 | `--prefer-newest` | Prefer the most recently modified member before native path order. |
+| `--include-empty` | Make empty files eligible copies. By default empty-file groups are reported but every non-keeper is `retained: empty file`, so plans never act on them (they are often markers such as `__init__.py` or `.gitkeep`). |
 | `--one-file-system` | Do not cross into other filesystems below each root. |
-| `--cache FILE` | Fingerprint cache to refresh after the scan. Never consulted unless `--trust-cache`. |
+| `--cache FILE` | Fingerprint cache to refresh after the scan. Never consulted unless `--trust-cache`. FILE must be absent or an existing rdedupe cache; any other file, a symlink or a file with other hard links is refused (exit 4) before scanning and left untouched. |
 | `--trust-cache` | Reuse cached fingerprints whose validators match. Makes the scan heuristic; plans refuse it. |
 | `--fresh` | Ignore existing cache contents (the cache is still rewritten). |
 | `--progress` | Stage progress on stderr. |
 | `--memory-mib N` | Working-set budget: SQLite page cache + read buffers + 4 MiB allowance (default 64). |
 | `--buffer-kib N` | Size of each read buffer, 4 to 8192 (default 256). |
 | `--readers N` | Concurrent fingerprint readers, 1 to 64 (default 2). |
-| `--descriptors N` | Maximum open file descriptors; must be at least 13 + readers (default 32). |
+| `--descriptors N` | Maximum open file descriptors, enforced as the process `RLIMIT_NOFILE` soft limit (never raised); must be at least 13 + readers (default 32). |
 | `--temp-mib N` | Maximum scratch database size, at least 16 (default 8192). Exceeding it fails the scan with "database or disk is full". |
 | `--scratch-dir DIR` | Where the private scratch workspace is created (default: the system temporary directory). It is removed on exit. |
 
@@ -138,7 +140,7 @@ never by key order or line position within a kind.
 `scan --format jsonl`, in order:
 
 - `summary` (first): `schema`, `binary_version`, `completeness` (`complete`/`partial`/`cancelled`/`failed`), `exactness` (`exact`/`heuristic`), `unresolved` (count), `cache_provenance`, and `metrics` (`sqlite_page_cache_bytes` is the page-cache cap derived
-from the budget, not memory actually used): `paths`, `objects`, `aliases`, `symlinks_skipped`, `special_files_skipped`, `candidate_objects`, `eliminated_by_size`, `eliminated_by_fingerprint`, `fingerprint_bytes_read`, `comparison_bytes_read`, `cached_fingerprints_reused`, `groups`, `participants`, `eligible_copies`, `logical_redundant_bytes`, `estimated_allocated_bytes`, `sqlite_page_cache_bytes`.
+from the budget, not memory actually used): `paths`, `objects`, `aliases`, `symlinks_skipped`, `special_files_skipped`, `owned_dirs_skipped`, `candidate_objects`, `eliminated_by_size`, `eliminated_by_fingerprint`, `fingerprint_bytes_read`, `full_hash_bytes_read`, `comparison_bytes_read`, `cached_fingerprints_reused`, `groups`, `participants`, `eligible_copies`, `logical_redundant_bytes`, `estimated_allocated_bytes`, `sqlite_page_cache_bytes`.
 - `member` (one per group member, ordered by group then path): `group`, `path`, `identity` (`device`, `inode`), `size`, `allocated`, `links`, `is_keeper`, `protected`, `reason`.
 - `unresolved`: `path`, `operation` (`traverse`, `metadata`, `fingerprint`, `compare`), `message`, `retry_safe`.
 - `end` (last): `schema`, `groups`, `unresolved`. A stream without `end` was cut short.
@@ -164,10 +166,14 @@ Locations: `in_place`, `in_quarantine`, `in_quarantine_original_occupied`, `both
 
 ## Quarantine layout
 
-Each target moves to `<its directory>/.rdedupe-quarantine/<journal id>/<sequence>-<hex>`,
-where `<hex>` is the hex of the original name, truncated to 160 characters (so a long
-name may lose its extension there). Restore and purge locate objects through the
-journal, not by name. Emptied quarantine directories are removed by `restore` and
+Each target moves to `<its directory>/.rdedupe-quarantine/<journal id>/<action>-<hex>`,
+where `<action>` is the 16-digit hex action number and `<hex>` the hex of the original
+name, truncated to 160 characters (so a long name may lose its extension there). Restore
+and purge locate objects through the journal, not by name, and refuse any journal record
+whose quarantine path is not exactly this slot. A `.rdedupe-quarantine` that rdedupe did
+not create (no marker) is never written to or chmodded: that action is `skipped_stale`.
+Quarantine directories with a valid marker are excluded from scans and counted in
+`owned_dirs_skipped`. Emptied quarantine directories are removed by `restore` and
 `purge`; one that still holds objects of any journal keeps its marker.
 
 ## Plans (`rdedupe-plan-v1`)
@@ -175,15 +181,28 @@ journal, not by name. Emptied quarantine directories are removed by `restore` an
 JSONL. Line 1 is the header (`schema`, `binary_version`, `roots`, `protect`, `prefer`,
 `prefer_newest`, `completeness`, `exactness`, `action`). Then one action per line
 (`group`, `target`, `target_observation`, `keeper`, `keeper_observation`, `reason`).
-The last line is the footer (`schema: rdedupe-plan-footer-v1`, `actions`, `checksum`).
-The checksum detects corruption only; validation also rejects out-of-scope or relative
-paths, protected targets, duplicate targets, keepers that are also targets, unknown
-schemas or encodings, and partial or heuristic headers.
+The header also carries `include_empty`. The last line is the footer
+(`schema: rdedupe-plan-footer-v1`, `actions`, `checksum`, `seal`). The checksum detects
+corruption; the seal is a keyed BLAKE3 under the user's private key, so a plan edited by
+anyone (even with the checksum recomputed) or created by another user is rejected.
+Validation also rejects out-of-scope, relative or non-normalized paths (`//`, `/./`,
+trailing `/`), protected targets, duplicate targets, keepers that are also targets,
+unknown schemas or encodings, and partial or heuristic headers. While `apply` runs, its
+verification index lives in the system temporary directory (`$TMPDIR`).
+
+## Key and state directory
+
+Plans and every journal record are sealed with a random key created on first use at
+`$RDEDUPE_STATE_DIR/seal.key`, else `$XDG_STATE_HOME/rdedupe/seal.key`, else
+`~/.local/state/rdedupe/seal.key` (directory 0700, file 0600). `apply`, `restore`,
+`purge` and `recover` need the same key that wrote the plan or journal: run them as the
+same user with the same environment. Deleting the key makes existing plans and journals
+unusable (quarantined files stay on disk and can be moved back by hand).
 
 ## Budgets
 
 Defaults suit most machines. For very large trees or small machines use
 `--memory-mib 16 --buffer-kib 64 --readers 1 --descriptors 16`; the minimum accepted is
-`--memory-mib 8 --buffer-kib 4 --readers 1 --descriptors 14 --temp-mib 16`. The budget
+`--memory-mib 7 --buffer-kib 4 --readers 1 --descriptors 14 --temp-mib 16`. The budget
 bounds the engine's working set; whole-process RSS adds the binary and allocator overhead
 (measured at about 12 MiB peak for a 16 MiB budget on 4,000 files).

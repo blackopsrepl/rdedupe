@@ -106,8 +106,61 @@ pub fn load(path: &Path, store: &Store) -> Result<Loaded> {
     Ok(Loaded::Entries(count))
 }
 
-/// Atomically replaces the cache with the fingerprints computed (or reused) by this scan.
-pub fn write(path: &Path, store: &Store) -> Result<u64> {
+/// What occupies the cache path before a scan. Checked before any work and again right
+/// before publishing, so `--cache` can never destroy a file that is not an rdedupe cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    /// Nothing is there; the cache is published without replacing anything.
+    Empty,
+    /// A single-link regular file with an rdedupe cache header, with this identity.
+    Cache(FileIdentity),
+}
+
+/// Inspects the cache path. Refuses (with an error, before scanning) anything that is not
+/// absent or an existing rdedupe cache: a user file, a symlink, a directory, or a file with
+/// other hard links (which would be an alias of data).
+pub fn claim(path: &Path) -> Result<Slot> {
+    let refuse = |why: String| {
+        Err(crate::Error::Config(format!(
+            "refusing --cache {}: {why}; it is left untouched",
+            crate::paths::display_path(path)
+        )))
+    };
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Slot::Empty),
+        Err(error) => return Err(io("inspect cache", path, error)),
+    };
+    if !metadata.file_type().is_file() {
+        return refuse("it exists and is not a regular file".into());
+    }
+    let observation = crate::platform::observation(&metadata);
+    if observation.links != 1 {
+        return refuse("it has other hard links".into());
+    }
+    let mut first = Vec::new();
+    let file = std::fs::File::open(path).map_err(|e| io("open cache", path, e))?;
+    BufReader::new(std::io::Read::take(file, 4096))
+        .read_until(b'\n', &mut first)
+        .map_err(|e| io("read cache", path, e))?;
+    let is_cache = serde_json::from_slice::<serde_json::Value>(first.trim_ascii_end())
+        .ok()
+        .and_then(|v| {
+            v.get("schema")?
+                .as_str()
+                .map(|s| s.starts_with("rdedupe-cache-v"))
+        })
+        .unwrap_or(false);
+    if !is_cache {
+        return refuse("it exists and is not an rdedupe cache".into());
+    }
+    Ok(Slot::Cache(observation.identity))
+}
+
+/// Publishes the cache with the fingerprints computed (or reused) by this scan. The slot
+/// must still be what [`claim`] found: an absent path is filled without replacement, and
+/// an existing cache is replaced only if it is still the same file.
+pub fn write(path: &Path, store: &Store, slot: Slot) -> Result<u64> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -166,7 +219,22 @@ pub fn write(path: &Path, store: &Store) -> Result<u64> {
             .map_err(|e| crate::Error::Output(e.into_error()))?;
         file.sync_all()
             .map_err(|e| io("sync cache", &temporary, e))?;
-        std::fs::rename(&temporary, path).map_err(|e| io("publish cache", path, e))?;
+        if claim(path)? != slot {
+            return Err(crate::Error::Config(format!(
+                "{} changed during the scan; the cache was not written",
+                crate::paths::display_path(path)
+            )));
+        }
+        match slot {
+            Slot::Empty => {
+                std::fs::hard_link(&temporary, path).map_err(|e| io("publish cache", path, e))?;
+                std::fs::remove_file(&temporary)
+                    .map_err(|e| io("remove temporary cache", &temporary, e))?;
+            }
+            Slot::Cache(_) => {
+                std::fs::rename(&temporary, path).map_err(|e| io("publish cache", path, e))?
+            }
+        }
         crate::platform::sync_parent(path)
     })();
     if result.is_err() {

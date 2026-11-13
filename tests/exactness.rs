@@ -1,8 +1,10 @@
 mod support;
 
+use rdedupe::fileinfo::observe_path;
 use rdedupe::fingerprint::{Blake3Fingerprinter, CollisionFingerprinter, Fingerprinter};
+use rdedupe::model::Observation;
 use rdedupe::scheduler::Cancellation;
-use rdedupe::{Budget, Completeness, Policy};
+use rdedupe::{Budget, Completeness, Exactness, Policy};
 use std::path::Path;
 use support::*;
 
@@ -96,10 +98,10 @@ fn identical_samples_with_unsampled_difference_are_not_duplicates() {
     let mut buffer = vec![0; 65_536];
     let cancel = Cancellation::default();
     let (fa, _) = Blake3Fingerprinter
-        .fingerprint(&pa, &mut buffer, &cancel)
+        .fingerprint(&pa, &observe_path(&pa).unwrap(), &mut buffer, &cancel)
         .unwrap();
     let (fb, _) = Blake3Fingerprinter
-        .fingerprint(&pb, &mut buffer, &cancel)
+        .fingerprint(&pb, &observe_path(&pb).unwrap(), &mut buffer, &cancel)
         .unwrap();
     assert_eq!(fa, fb, "fixture must defeat the sampled fingerprint");
     let result = library_scan(&[fixture.root()], Policy::default());
@@ -118,7 +120,7 @@ fn fingerprints_do_not_depend_on_the_buffer_size() {
         let mut buffer = vec![0; size];
         digests.insert(
             Blake3Fingerprinter
-                .fingerprint(&path, &mut buffer, &cancel)
+                .fingerprint(&path, &observe_path(&path).unwrap(), &mut buffer, &cancel)
                 .unwrap()
                 .0,
         );
@@ -179,8 +181,17 @@ fn empty_files_group_and_hard_links_collapse() {
     assert_eq!(store_groups(&result), Groups::from([group([&a, &b, &d])]));
     assert_eq!(store_groups(&result), oracle(&[fixture.root()]));
     assert_eq!(result.summary.metrics.aliases, 1);
-    assert_eq!(result.summary.metrics.eligible_copies, 2);
-    assert_eq!(result.summary.metrics.logical_redundant_bytes, 0);
+    // Empty files are grouped but retained unless the policy opts in.
+    assert_eq!(result.summary.metrics.eligible_copies, 0);
+    let included = library_scan(
+        &[fixture.root()],
+        Policy {
+            include_empty: true,
+            ..Policy::default()
+        },
+    );
+    assert_eq!(included.summary.metrics.eligible_copies, 2);
+    assert_eq!(included.summary.metrics.logical_redundant_bytes, 0);
 }
 
 struct FailOn(&'static str);
@@ -189,13 +200,14 @@ impl Fingerprinter for FailOn {
     fn fingerprint(
         &self,
         path: &Path,
+        expected: &Observation,
         buffer: &mut [u8],
         cancel: &Cancellation,
     ) -> rdedupe::Result<([u8; 32], u64)> {
         if path.file_name().is_some_and(|n| n == self.0) {
             Err(rdedupe::Error::Unstable("injected read failure".into()))
         } else {
-            Blake3Fingerprinter.fingerprint(path, buffer, cancel)
+            Blake3Fingerprinter.fingerprint(path, expected, buffer, cancel)
         }
     }
 }
@@ -233,4 +245,67 @@ fn read_failure_is_unresolved_partial_and_blocks_plans() {
         Err(rdedupe::Error::Partial)
     ));
     assert!(!plan.exists());
+}
+
+/// Rewrites one file just before it is fingerprinted, after it was inventoried.
+struct RewriteBefore {
+    name: &'static str,
+    content: Vec<u8>,
+}
+
+impl Fingerprinter for RewriteBefore {
+    fn fingerprint(
+        &self,
+        path: &Path,
+        expected: &Observation,
+        buffer: &mut [u8],
+        cancel: &Cancellation,
+    ) -> rdedupe::Result<([u8; 32], u64)> {
+        if path.file_name().is_some_and(|n| n == self.name) {
+            std::fs::write(path, &self.content).unwrap();
+        }
+        Blake3Fingerprinter.fingerprint(path, expected, buffer, cancel)
+    }
+}
+
+#[test]
+fn a_file_changed_after_inventory_is_unresolved_never_unique() {
+    let fixture = Fixture::new();
+    fixture.write("a", &[1; 10]);
+    fixture.write("b", &[1; 10]);
+    fixture.write("c", &[2; 20]);
+    let result = library_scan_with(
+        &[fixture.root()],
+        Policy::default(),
+        Budget {
+            readers: 1,
+            ..Budget::default()
+        },
+        &RewriteBefore {
+            name: "b",
+            content: vec![2; 20],
+        },
+    );
+    assert_eq!(result.summary.completeness, Completeness::Partial);
+    assert_eq!(result.summary.exactness, Exactness::Exact);
+    assert!(result.summary.unresolved >= 1);
+}
+
+#[test]
+fn sample_collisions_are_refined_with_linear_reads() {
+    // N files identical in every sampled window, each different in unsampled bytes: the
+    // engine must not compare every file against every equality class.
+    let fixture = Fixture::new();
+    let size = 300 * 1024;
+    let n = 40u32;
+    for i in 0..n {
+        let mut content = vec![9u8; size];
+        content[100_000..100_004].copy_from_slice(&i.to_le_bytes());
+        fixture.write(format!("f{i:02}"), &content);
+    }
+    let result = library_scan(&[fixture.root()], Policy::default());
+    assert!(store_groups(&result).is_empty());
+    let metrics = &result.summary.metrics;
+    assert_eq!(metrics.full_hash_bytes_read, u64::from(n) * size as u64);
+    assert_eq!(metrics.comparison_bytes_read, 0);
 }

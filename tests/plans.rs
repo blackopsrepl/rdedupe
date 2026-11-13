@@ -247,3 +247,80 @@ fn partial_scans_produce_no_plan_file() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("partial"));
     assert!(!plan.exists());
 }
+
+/// The review's attack: drop `--protect`, swap target and keeper, or widen the roots, and
+/// recompute the public checksum. Without the user's key the seal fails, so nothing moves.
+#[test]
+fn edits_with_a_recomputed_checksum_fail_the_seal() {
+    let fixture = Fixture::new();
+    let work = Fixture::new();
+    let plan = planned(&fixture, &work);
+    let original = std::fs::read(&plan).unwrap();
+    type Edit = Box<dyn Fn(&mut Vec<serde_json::Value>)>;
+    // Edits that pass every structural check are caught by the seal alone.
+    let edits: Vec<Edit> = vec![
+        Box::new(|lines| lines[0]["protect"] = serde_json::json!([])),
+        Box::new(|lines| {
+            // Swap target and keeper of the single-copy group (x2 → x1 becomes x1 → x2).
+            let line = lines.last_mut().unwrap();
+            let target = line["target"].clone();
+            line["target"] = line["keeper"].clone();
+            line["keeper"] = target;
+        }),
+        Box::new(|lines| lines[0]["roots"] = serde_json::json!([encoded(Path::new("/"))])),
+    ];
+    for edit in edits {
+        std::fs::write(&plan, &original).unwrap();
+        rewrite_plan_unsealed(&plan, edit);
+        rejected(&plan, "seal");
+    }
+    for name in ["a", "b", "c", "x1", "x2"] {
+        assert!(fixture.path(name).exists());
+    }
+}
+
+#[test]
+fn plans_from_another_key_are_rejected() {
+    let fixture = Fixture::new();
+    let work = Fixture::new();
+    let plan = planned(&fixture, &work);
+    let other_state = Fixture::new();
+    rdedupe()
+        .env("RDEDUPE_STATE_DIR", other_state.root())
+        .args(["apply", "--force", "--plan"])
+        .arg(&plan)
+        .arg("--journal")
+        .arg(work.path("journal"))
+        .assert()
+        .code(4);
+    assert!(!work.path("journal").exists());
+    for name in ["a", "b", "c"] {
+        assert!(fixture.path(name).exists());
+    }
+}
+
+#[test]
+fn non_normalized_paths_are_rejected() {
+    let fixture = Fixture::new();
+    let work = Fixture::new();
+    let plan = planned(&fixture, &work);
+    let original = std::fs::read(&plan).unwrap();
+    for spelled in ["./b", "/b", "b/"] {
+        std::fs::write(&plan, &original).unwrap();
+        let mut bytes = fixture.root().as_os_str().as_encoded_bytes().to_vec();
+        bytes.extend_from_slice(b"/");
+        bytes.extend_from_slice(spelled.as_bytes());
+        let path = std::path::PathBuf::from(unsafe {
+            std::ffi::OsString::from_encoded_bytes_unchecked(bytes)
+        });
+        rewrite_plan(&plan, |lines| {
+            let copy = {
+                let mut copy = lines[1].clone();
+                copy["target"] = encoded(&path);
+                copy
+            };
+            lines.push(copy);
+        });
+        rejected(&plan, "normalized");
+    }
+}

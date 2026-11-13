@@ -65,9 +65,13 @@ pub struct Metrics {
     pub aliases: u64,
     pub symlinks_skipped: u64,
     pub special_files_skipped: u64,
+    /// rdedupe-owned directories (marked quarantines, the scratch workspace) not scanned.
+    pub owned_dirs_skipped: u64,
     pub candidate_objects: u64,
     pub fingerprint_bytes_read: u64,
     pub comparison_bytes_read: u64,
+    /// Bytes read to split sampled-digest buckets of more than two members.
+    pub full_hash_bytes_read: u64,
     pub cached_fingerprints_reused: u64,
     pub eliminated_by_size: u64,
     pub eliminated_by_fingerprint: u64,

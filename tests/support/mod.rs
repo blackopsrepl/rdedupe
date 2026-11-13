@@ -314,15 +314,26 @@ pub fn apply(
     (summary, outcomes)
 }
 
-/// Rewrites a plan's lines and recomputes its footer, producing a plan with a valid
-/// checksum: the checksum detects corruption, so validation must still reject tampering.
+/// Rewrites a plan's lines and recomputes its footer, checksum and seal with this user's
+/// key: it simulates a tamperer who holds the key, so structural validation must still
+/// reject the edit on its own.
 pub fn rewrite_plan(plan: &Path, edit: impl FnOnce(&mut Vec<Value>)) {
+    rewrite_plan_with(plan, edit, true)
+}
+
+/// Like [`rewrite_plan`], but keeps the original seal (a tamperer without the key who
+/// still recomputes the public checksum).
+pub fn rewrite_plan_unsealed(plan: &Path, edit: impl FnOnce(&mut Vec<Value>)) {
+    rewrite_plan_with(plan, edit, false)
+}
+
+fn rewrite_plan_with(plan: &Path, edit: impl FnOnce(&mut Vec<Value>), reseal: bool) {
     let text = std::fs::read_to_string(plan).expect("read plan");
     let mut lines: Vec<Value> = text
         .lines()
         .map(|line| serde_json::from_str(line).expect("plan line"))
         .collect();
-    lines.pop();
+    let old_footer = lines.pop().expect("footer");
     edit(&mut lines);
     let mut hash = blake3::Hasher::new();
     let mut output = Vec::new();
@@ -333,10 +344,17 @@ pub fn rewrite_plan(plan: &Path, edit: impl FnOnce(&mut Vec<Value>)) {
         output.extend(line);
         output.push(b'\n');
     }
+    let checksum = hash.finalize().to_hex().to_string();
+    let seal = if reseal {
+        rdedupe::plan::seal_for(&checksum).expect("seal")
+    } else {
+        old_footer["seal"].as_str().unwrap().to_string()
+    };
     let footer = serde_json::json!({
         "schema": "rdedupe-plan-footer-v1",
         "actions": lines.len() - 1,
-        "checksum": hash.finalize().to_hex().to_string(),
+        "checksum": checksum,
+        "seal": seal,
     });
     output.extend(serde_json::to_vec(&footer).unwrap());
     output.push(b'\n');
