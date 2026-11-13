@@ -144,6 +144,11 @@ pub fn xattr_digest(path: &Path) -> Option<[u8; 32]> {
         if needed < 0 {
             return None;
         }
+        let mut hasher = blake3::Hasher::new();
+        if needed == 0 {
+            // No attributes (the common case): one system call.
+            return Some(*hasher.finalize().as_bytes());
+        }
         let mut names = vec![0u8; needed as usize];
         let got = list(names.as_mut_ptr().cast(), names.len());
         if got < 0 {
@@ -152,7 +157,6 @@ pub fn xattr_digest(path: &Path) -> Option<[u8; 32]> {
         names.truncate(got as usize);
         let mut sorted: Vec<&[u8]> = names.split(|b| *b == 0).filter(|n| !n.is_empty()).collect();
         sorted.sort_unstable();
-        let mut hasher = blake3::Hasher::new();
         for name in sorted {
             let c_name = std::ffi::CString::new(name).ok()?;
             let size = get(&c_name, std::ptr::null_mut(), 0);
@@ -245,7 +249,6 @@ pub fn remove_abandoned_scratch(base: &Path, prefix: &str) -> Result<u64> {
     Ok(removed)
 }
 
-/// Returns whether a directory entry exists at `path` without following a final symlink.
 /// Lowers this process's open-descriptor limit (the `RLIMIT_NOFILE` soft limit) to `max`,
 /// so a descriptor budget is enforced by the kernel rather than only estimated. Never
 /// raises the limit.

@@ -47,9 +47,16 @@ impl Cancellation {
 /// A lease returns its buffer on drop; `take` blocks while all are lent (backpressure), so
 /// the scan never holds more buffer memory than the budget accounts for.
 pub struct BufferPool {
-    free: Mutex<Vec<Vec<u8>>>,
+    free: Mutex<Free>,
     available: Condvar,
     size: usize,
+}
+
+struct Free {
+    buffers: Vec<Vec<u8>>,
+    /// Threads blocked in [`BufferPool::take`]. Returning a buffer wakes one only when
+    /// this is non-zero: an unconditional `notify_one` costs a system call per return.
+    waiting: usize,
 }
 
 pub struct Lease<'a> {
@@ -60,7 +67,10 @@ pub struct Lease<'a> {
 impl BufferPool {
     pub fn new(count: usize, size: usize) -> Self {
         Self {
-            free: Mutex::new((0..count.max(1)).map(|_| vec![0; size]).collect()),
+            free: Mutex::new(Free {
+                buffers: (0..count.max(1)).map(|_| vec![0; size]).collect(),
+                waiting: 0,
+            }),
             available: Condvar::new(),
             size,
         }
@@ -73,13 +83,15 @@ impl BufferPool {
     pub fn take(&self) -> Lease<'_> {
         let mut free = self.free.lock().expect("buffer pool");
         loop {
-            if let Some(buffer) = free.pop() {
+            if let Some(buffer) = free.buffers.pop() {
                 return Lease {
                     pool: self,
                     buffer: Some(buffer),
                 };
             }
+            free.waiting += 1;
             free = self.available.wait(free).expect("buffer pool");
+            free.waiting -= 1;
         }
     }
 }
@@ -100,8 +112,11 @@ impl std::ops::DerefMut for Lease<'_> {
 impl Drop for Lease<'_> {
     fn drop(&mut self) {
         if let Some(buffer) = self.buffer.take() {
-            self.pool.free.lock().expect("buffer pool").push(buffer);
-            self.pool.available.notify_one();
+            let mut free = self.pool.free.lock().expect("buffer pool");
+            free.buffers.push(buffer);
+            if free.waiting > 0 {
+                self.pool.available.notify_one();
+            }
         }
     }
 }
@@ -154,6 +169,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_take_is_woken_when_a_buffer_returns() {
+        let pool = BufferPool::new(1, 16);
+        let held = pool.take();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| pool.take().len());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+            assert_eq!(waiter.join().unwrap(), 16);
+        });
+    }
     use std::sync::atomic::AtomicUsize;
 
     #[test]
