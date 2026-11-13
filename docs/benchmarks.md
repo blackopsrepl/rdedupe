@@ -273,6 +273,27 @@ read per file, never one comparison per class
 (`tests/exactness.rs::crafted_collisions_of_small_files_cost_linear_reads`: 36,864
 comparison bytes for both 40 and 80 crafted files).
 
+### After the final audit (`c6049a4`)
+
+The last code changes (charging comparison failures to the representative, escaping every
+human message with a printable-ASCII fast path) were checked against `5e5f35b`, the
+revision the tables above measure, with user-space instructions per scan
+(`perf stat -e instructions:u`, 5 runs, insensitive to host load):
+
+| workload | `5e5f35b` | `c6049a4` |
+|---|---:|---:|
+| hardlinks | 56.2M | 56.2M |
+| large-duplicates | 34.4M | 34.2M |
+| same-size-distinct | 133.3M | 133.2M |
+| sample-collisions | 227.4M | 227.4M |
+| shared-prefix | 132.5M | 132.5M |
+| sparse | 15.8M | 15.8M |
+| tiny-duplicates | 1,327.0M | 1,280.5M |
+| unique-sizes | 57.6M | 57.6M |
+
+No workload got slower. tiny-duplicates, whose human report is 6,000 lines, runs 3.5%
+fewer instructions because of the fast path. The wall-clock tables were not re-run.
+
 ## In-process pipeline (`cargo bench --bench pipeline`)
 
 These are library scans of generated fixtures: fixed seeds, a fresh temporary directory,
