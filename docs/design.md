@@ -117,12 +117,12 @@ verification (its own disk-backed index under `apply --scratch-dir`, capped by
 The budget bounds the engine's working set. Measured whole-process RSS additionally
 includes the binary, the allocator and libc, so the two are related but not identical.
 `tests/resources.rs` runs a 4,000-member group plus two 256 MiB files under
-`RLIMIT_NOFILE=16` and asserts peak RSS below 64 MiB (observed: about 13 MiB with a
+`RLIMIT_NOFILE=16` and asserts peak RSS below 64 MiB (observed: about 14 MiB with a
 16 MiB budget), and scans 60,600 paths at a 7 MiB budget with `--queue 64`, where the inventory
 database ends about 14 times larger than the page cache (`inventory_bytes` versus
 `sqlite_page_cache_bytes` in the summary), asserting exact groups, peak RSS below 32 MiB
 (observed: about 12 MiB) and at most 16 open descriptors sampled from `/proc` (observed:
-6).
+5).
 
 ## Empty files, metadata differences and storage
 

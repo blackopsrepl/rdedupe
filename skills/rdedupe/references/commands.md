@@ -224,5 +224,5 @@ Defaults suit most machines. For very large trees or small machines use
 `--memory-mib 6 --buffer-kib 4 --readers 1 --descriptors 14 --temp-mib 16 --queue 16`
 (`--memory-mib 7` with the default queue). The budget
 bounds the engine's working set; whole-process RSS adds the binary and allocator overhead
-(measured at about 10.6 MiB peak for a 16 MiB budget on a 4,000-member group plus two
+(measured at about 10.7 MiB peak for a 16 MiB budget on a 4,000-member group plus two
 256 MiB files; see docs/benchmarks.md).

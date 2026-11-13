@@ -37,7 +37,7 @@ reads: 786432 fingerprint bytes, 0 full-content bytes, 7059456 comparison bytes;
 - **Bounded.** Inventory and grouping live in a private on-disk SQLite workspace with a
   memory budget (`--memory-mib`, default 64), a descriptor budget and a scratch-size limit.
   No file is ever read whole into memory. A 4,000-member group plus two 256 MiB files scan
-  in about 10.6 MiB peak RSS with a 16 MiB budget ([measured](docs/benchmarks.md)).
+  in about 10.7 MiB peak RSS with a 16 MiB budget ([measured](docs/benchmarks.md)).
 - **Deterministic.** Output and keeper choice depend only on the files, never on traversal
   order, thread count or budget.
 - **Recoverable.** Changes go through a saved plan; every action is re-checked against the
