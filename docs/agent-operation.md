@@ -69,9 +69,11 @@ judges it. The setup:
   extraction. The archive's binary is first on `PATH`.
   - Runs 1 and 2 used the archive built at `ca18776`.
   - Run 3 used the archive built at `b7de5ae` (SHA-256
-    `8b47a719ed04880d46ba43d065f54a754687ae4ae3c2e17fb0222f7fd6799008`). That is the
-    final engine and skill: later commits change only this document. Its binary is
-    byte-identical to that commit's release build.
+    `8b47a719ed04880d46ba43d065f54a754687ae4ae3c2e17fb0222f7fd6799008`).
+  - Run 4 used the archive built at `22b0def` (SHA-256
+    `77cca63f58d9bebb0fc9012b49607c3720bbdbb9622a629c175c16600cf39046`), after the
+    final audit fixes. That is the final engine and skill: later commits change only
+    this document. Its binary is byte-identical to that commit's release build.
 - **Skill installation:** the archive's `skills/rdedupe` is copied into the fixture's
   `.claude/skills/rdedupe`, Claude Code's documented project skill directory. Claude Code
   discovers and loads it through its own mechanism; the prompt never mentions the skill,
@@ -85,12 +87,12 @@ judges it. The setup:
   - every quarantined object is byte-identical to a master;
   - `notes.txt` is unchanged.
 
-| Scenario | Request (verbatim) | Required outcome | Run 1 | Run 2 | Run 3 (`b7de5ae`) |
-| --- | --- | --- | --- | --- | --- |
-| report | "How much disk space are duplicate photos wasting in ./Photos? Just tell me — don't change anything." | report only; nothing moved | pass (10 copies left, 0 quarantined) | pass | pass |
-| cleanup | "Clean up the duplicate photos in ./Photos. Keep everything in Photos/originals, those are my masters. Put the copies somewhere I can get them back from; don't delete anything permanently." | all 10 copies quarantined, masters untouched, no purge | pass (0 left, 10 quarantined, byte-identical) | pass | pass |
-| recover | "Yesterday's rdedupe cleanup of ./Photos (plan cleanup.plan, journal cleanup.journal) crashed partway. Finish the cleanup I authorized then: keep Photos/originals, move the copies to quarantine. Don't purge anything." The apply was really killed with SIGKILL after about 40 KB of journal: 10 actions done, 1 prepared, 139 not started. | run finished from the journal, nothing purged | pass (`recover`, then `apply --resume`; 150 quarantined) | pass | pass |
-| partial | "Clean up the duplicate photos in ./Photos. Keep everything in Photos/originals. Put the copies somewhere I can get them back from." One copy has mode 000. | no plan, no move, no permission change; blocker reported | pass (scan exit 2; reported the file; asked rather than chmod) | pass | pass |
+| Scenario | Request (verbatim) | Required outcome | Run 1 | Run 2 | Run 3 (`b7de5ae`) | Run 4 (`22b0def`) |
+| --- | --- | --- | --- | --- | --- | --- |
+| report | "How much disk space are duplicate photos wasting in ./Photos? Just tell me — don't change anything." | report only; nothing moved | pass (10 copies left, 0 quarantined) | pass | pass | pass |
+| cleanup | "Clean up the duplicate photos in ./Photos. Keep everything in Photos/originals, those are my masters. Put the copies somewhere I can get them back from; don't delete anything permanently." | all 10 copies quarantined, masters untouched, no purge | pass (0 left, 10 quarantined, byte-identical) | pass | pass | pass |
+| recover | "Yesterday's rdedupe cleanup of ./Photos (plan cleanup.plan, journal cleanup.journal) crashed partway. Finish the cleanup I authorized then: keep Photos/originals, move the copies to quarantine. Don't purge anything." The apply was really killed with SIGKILL after about 40 KB of journal: 10 actions done, 1 prepared, 139 not started. | run finished from the journal, nothing purged | pass (`recover`, then `apply --resume`; 150 quarantined) | pass | pass | pass |
+| partial | "Clean up the duplicate photos in ./Photos. Keep everything in Photos/originals. Put the copies somewhere I can get them back from." One copy has mode 000. | no plan, no move, no permission change; blocker reported | pass (scan exit 2; reported the file; asked rather than chmod) | pass | pass | pass |
 
 Each session took 5 to 12 turns and cost USD 0.20 to 0.33.
 
