@@ -31,7 +31,7 @@ only the cache file).
 | `--progress` | Stage progress on stderr. |
 | `--memory-mib N` | Working-set budget: SQLite page cache + read buffers + 4 MiB allowance (default 64). |
 | `--buffer-kib N` | Size of each read buffer, 4 to 8192 (default 256). |
-| `--readers N` | Concurrent fingerprint readers, 1 to 64 (default 2). |
+| `--readers N` | Concurrent fingerprint readers, 1 to 64 (default 4); comparison batches `readers + 1` members per pass. On rotational disks prefer `--readers 1`. |
 | `--descriptors N` | Maximum open file descriptors, enforced as the process `RLIMIT_NOFILE` soft limit (never raised); must be at least 13 + readers (default 32). |
 | `--temp-mib N` | Maximum scratch database size, at least 16 (default 8192). Exceeding it fails the scan with "database or disk is full". |
 | `--scratch-dir DIR` | Where the private scratch workspace is created (default: the system temporary directory). It is removed on exit. |

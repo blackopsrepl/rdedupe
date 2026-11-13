@@ -126,7 +126,7 @@ pub struct BudgetArgs {
     #[arg(long, default_value_t = 256, value_name = "KIB")]
     pub buffer_kib: usize,
     /// Concurrent fingerprint readers.
-    #[arg(long, default_value_t = 2, value_name = "N")]
+    #[arg(long, default_value_t = 4, value_name = "N")]
     pub readers: usize,
     /// Maximum open file descriptors, enforced as the process RLIMIT_NOFILE soft limit.
     #[arg(long, default_value_t = 32, value_name = "N")]

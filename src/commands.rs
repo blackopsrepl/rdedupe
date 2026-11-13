@@ -89,7 +89,7 @@ fn legacy(cli: Cli, cancel: &Cancellation) -> Result<i32> {
         budget: BudgetArgs {
             memory_mib: 64,
             buffer_kib: 256,
-            readers: 2,
+            readers: 4,
             descriptors: 32,
             temp_mib: 8192,
             scratch_dir: None,

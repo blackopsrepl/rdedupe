@@ -35,7 +35,7 @@ impl Default for Budget {
         Self {
             memory_bytes: 64 * 1024 * 1024,
             buffer_bytes: 256 * 1024,
-            readers: 2,
+            readers: 4,
             descriptors: 32,
             temp_bytes: 8 * 1024 * 1024 * 1024,
             scratch_dir: None,

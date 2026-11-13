@@ -192,12 +192,8 @@ fn compare_phase(
             return Ok(());
         };
         for digest in digests {
-            store.reset_comparison_classes()?;
             match classify_bucket(store, options, metrics, phase, &digest)? {
-                Bucket::Classified => {
-                    let (_, eliminated) = store.materialize_comparison_groups()?;
-                    metrics.eliminated_by_comparison += eliminated;
-                }
+                Bucket::Classified => {}
                 Bucket::TooManyClasses => store.flag_for_refinement(&digest)?,
             }
             buckets += 1;
@@ -214,17 +210,26 @@ fn classify_bucket(
     phase: i64,
     digest: &[u8],
 ) -> Result<Bucket> {
+    let first = store.bucket_after(phase, digest, None)?;
+    let Some(last) = first.last() else {
+        return Ok(Bucket::Classified);
+    };
+    // Samples cover every byte up to two windows; beyond that, many classes in one sampled
+    // bucket mean the samples are blind to the differences.
+    let limited = phase == SAMPLED && last.observation.size > 2 * crate::fingerprint::WINDOW;
+    if (first.len() as u64) < crate::store::PAGE {
+        return classify_in_memory(store, options, metrics, &first, limited);
+    }
+    store.reset_comparison_classes()?;
     let mut classes = 0u64;
-    let mut last_path: Option<Vec<u8>> = None;
+    let mut page = first;
     loop {
-        let page = store.bucket_after(phase, digest, last_path.as_deref())?;
         let Some(last) = page.last() else {
+            let (_, eliminated) = store.materialize_comparison_groups()?;
+            metrics.eliminated_by_comparison += eliminated;
             return Ok(Bucket::Classified);
         };
-        last_path = Some(path_bytes(&last.path).to_vec());
-        // Samples cover every byte up to two windows; beyond that, many classes in one
-        // sampled bucket mean the samples are blind to the differences.
-        let limited = phase == SAMPLED && last.observation.size > 2 * crate::fingerprint::WINDOW;
+        let last_path = path_bytes(&last.path).to_vec();
         for batch in page.chunks(batch_size(options)) {
             let mut pending: Vec<&FileRecord> = batch.iter().collect();
             join_existing_classes(store, options, metrics, &mut pending)?;
@@ -234,16 +239,60 @@ fn classify_bucket(
                 if limited && classes > CLASS_LIMIT {
                     return Ok(Bucket::TooManyClasses);
                 }
-                let mut rest: Vec<&FileRecord> = rest.to_vec();
-                compare_against(store, options, metrics, first, class_id, &mut rest)?;
-                pending = rest;
+                let (equal, different) = compare_batch(store, options, metrics, first, rest)?;
+                for record in equal {
+                    store.add_comparison_member(class_id, record)?;
+                }
+                pending = different;
             }
         }
+        page = store.bucket_after(phase, digest, Some(&last_path))?;
     }
 }
 
-/// Compares `pending` with every existing class representative; members that match join
-/// that class and leave `pending`.
+/// Classification of a bucket that fits in one page, with its equality classes in memory
+/// (bounded by the page size) instead of the scratch database.
+fn classify_in_memory(
+    store: &Store,
+    options: &Options<'_>,
+    metrics: &mut Metrics,
+    members: &[FileRecord],
+    limited: bool,
+) -> Result<Bucket> {
+    let mut classes: Vec<Vec<&FileRecord>> = Vec::new();
+    for batch in members.chunks(batch_size(options)) {
+        let mut pending: Vec<&FileRecord> = batch.iter().collect();
+        for class in classes.iter_mut() {
+            if pending.is_empty() {
+                break;
+            }
+            let (equal, different) = compare_batch(store, options, metrics, class[0], &pending)?;
+            class.extend(equal);
+            pending = different;
+        }
+        while let Some((&first, rest)) = pending.split_first() {
+            if limited && classes.len() as u64 >= CLASS_LIMIT {
+                return Ok(Bucket::TooManyClasses);
+            }
+            let (equal, different) = compare_batch(store, options, metrics, first, rest)?;
+            let mut class = vec![first];
+            class.extend(equal);
+            classes.push(class);
+            pending = different;
+        }
+    }
+    for class in classes {
+        if class.len() > 1 {
+            store.insert_group(&class)?;
+        } else {
+            metrics.eliminated_by_comparison += 1;
+        }
+    }
+    Ok(Bucket::Classified)
+}
+
+/// Compares `pending` with every existing class representative in the scratch database;
+/// members that match join that class and leave `pending`.
 fn join_existing_classes(
     store: &Store,
     options: &Options<'_>,
@@ -260,26 +309,30 @@ fn join_existing_classes(
             if pending.is_empty() {
                 return Ok(());
             }
-            compare_against(store, options, metrics, &representative, class_id, pending)?;
+            let (equal, different) =
+                compare_batch(store, options, metrics, &representative, pending)?;
+            for record in equal {
+                store.add_comparison_member(class_id, record)?;
+            }
+            *pending = different;
         }
         last_class = tail;
     }
     Ok(())
 }
 
-/// Compares `pending` with one representative in a single pass. Equal members join the
-/// representative's class; members that cannot be compared become unresolved; different
-/// members stay in `pending`.
-fn compare_against(
+/// Compares `pending` with one representative in a single pass and returns the members
+/// that are byte-identical to it and those that differ. Members that cannot be compared
+/// become unresolved and are in neither list.
+fn compare_batch<'a>(
     store: &Store,
     options: &Options<'_>,
     metrics: &mut Metrics,
     representative: &FileRecord,
-    class_id: i64,
-    pending: &mut Vec<&FileRecord>,
-) -> Result<()> {
+    pending: &[&'a FileRecord],
+) -> Result<(Vec<&'a FileRecord>, Vec<&'a FileRecord>)> {
     if pending.is_empty() {
-        return Ok(());
+        return Ok((Vec::new(), Vec::new()));
     }
     options.cancel.check()?;
     let members: Vec<_> = pending
@@ -292,6 +345,14 @@ fn compare_against(
         options.budget.buffer_bytes,
         options.cancel,
     );
+    let failed = |record: &FileRecord, error: &dyn std::fmt::Display| -> Result<()> {
+        store.remove_fingerprint(record)?;
+        let message = format!(
+            "comparison with {} failed: {error}",
+            display_path(&representative.path)
+        );
+        unresolved(store, record, "compare", message)
+    };
     let verdicts = match outcome {
         Ok((verdicts, bytes)) => {
             metrics.comparison_bytes_read += bytes;
@@ -299,32 +360,20 @@ fn compare_against(
         }
         Err(Error::Cancelled) => return Err(Error::Cancelled),
         Err(error) => {
-            let message = format!(
-                "comparison with {} failed: {error}",
-                display_path(&representative.path)
-            );
-            for record in pending.drain(..) {
-                store.remove_fingerprint(record)?;
-                unresolved(store, record, "compare", message.clone())?;
+            for record in pending {
+                failed(record, &error)?;
             }
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         }
     };
-    let mut different = Vec::with_capacity(pending.len());
-    for (record, verdict) in pending.drain(..).zip(verdicts) {
+    let mut equal = Vec::new();
+    let mut different = Vec::new();
+    for (&record, verdict) in pending.iter().zip(verdicts) {
         match verdict {
-            compare::Verdict::Equal => store.add_comparison_member(class_id, record)?,
+            compare::Verdict::Equal => equal.push(record),
             compare::Verdict::Different => different.push(record),
-            compare::Verdict::Failed(error) => {
-                store.remove_fingerprint(record)?;
-                let message = format!(
-                    "comparison with {} failed: {error}",
-                    display_path(&representative.path)
-                );
-                unresolved(store, record, "compare", message)?;
-            }
+            compare::Verdict::Failed(error) => failed(record, &error)?,
         }
     }
-    *pending = different;
-    Ok(())
+    Ok((equal, different))
 }

@@ -77,7 +77,8 @@ discover → size classes → fingerprints → exact comparison → groups → a
 All inventory, fingerprint, comparison-class and group state lives in a private SQLite
 database (`src/store.rs`) in a fresh `0700` workspace under `--scratch-dir`, removed on
 exit. Every consumer pages through it with keyset cursors of 256 rows; nothing collects
-the inventory in memory, including keeper selection, plan writing, reporting, plan
+the inventory in memory (a digest bucket that fits in one 256-row page is classified with
+its equality classes in memory; larger buckets keep them in the database), including keeper selection, plan writing, reporting, plan
 verification (which uses its own disk-backed index) and recovery (which streams the
 journal).
 
@@ -85,8 +86,9 @@ journal).
 
 - memory: SQLite page cache = `--memory-mib` − (readers + 1) × buffer − 4 MiB allowance,
   at least 2 MiB;
-- descriptors: 13 fixed (3 stdio, 1 output file, 4 for the SQLite database, WAL,
-  shared memory and temporary file, 2 comparison inputs, 2 walker directory handles,
+- descriptors: 13 fixed (3 stdio, 1 output file, 4 reserved for SQLite database and
+  temporary files — the scan database keeps no journal or shared-memory file, the plan
+  index used by `apply` does, 2 comparison inputs, 2 walker directory handles,
   1 directory handle for `fsync`) + one per reader, checked against `--descriptors` and
   enforced by lowering the process `RLIMIT_NOFILE` soft limit to it;
 - disk: SQLite `max_page_count` from `--temp-mib`; exhaustion fails the scan with an

@@ -72,7 +72,9 @@ impl Store {
         let database = workspace.join("inventory.sqlite3");
         let conn = Connection::open_with_flags(
             &database,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let store = Self {
             conn,
@@ -81,10 +83,14 @@ impl Store {
             pending: Cell::new(0),
         };
         // The scratch database is disposable: durability is irrelevant, bounded memory and
-        // bounded disk are what matter.
-        // `synchronous` first, so not even the switch to WAL syncs.
+        // bounded disk are what matter. No sync, no rollback journal (nothing is ever rolled
+        // back: any error abandons the whole workspace), and an exclusive lock so SQLite
+        // keeps no shared-memory index. The connection is used by one thread only.
         store.conn.pragma_update(None, "synchronous", "OFF")?;
-        store.conn.pragma_update(None, "journal_mode", "WAL")?;
+        store
+            .conn
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        store.conn.pragma_update(None, "journal_mode", "OFF")?;
         store.conn.pragma_update(None, "temp_store", "FILE")?;
         let temp_dir = crate::paths::display_path(&store.workspace);
         if !temp_dir.contains('\\') {
@@ -433,6 +439,23 @@ impl Store {
         )?;
         self.wrote()?;
         Ok(id)
+    }
+
+    /// Records one verified equality class of two or more members as a group.
+    pub fn insert_group(&self, members: &[&FileRecord]) -> Result<()> {
+        let next: i64 = self.row(
+            "SELECT COALESCE(MAX(group_id), 0) + 1 FROM groups",
+            [],
+            |r| r.get(0),
+        )?;
+        for member in members {
+            self.exec(
+                "INSERT INTO groups(group_id,file_id,path) VALUES(?1,?2,?3)",
+                params![next, member.id, path_bytes(&member.path)],
+            )?;
+            self.wrote()?;
+        }
+        Ok(())
     }
 
     pub fn add_comparison_member(&self, class_id: i64, record: &FileRecord) -> Result<()> {
