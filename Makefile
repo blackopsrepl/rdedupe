@@ -16,7 +16,7 @@ export CC_x86_64_unknown_linux_musl ?= musl-gcc
 export CC_aarch64_unknown_linux_musl ?= aarch64-linux-musl-gcc
 
 .PHONY: all build release format format-check lint test resource-tests skill-check \
-	filesystem-acceptance benchmark check dist dist-check clean help build-release \
+	filesystem-acceptance benchmark benchmark-compare check dist dist-check clean help build-release \
 	static static-x86 static-arm install uninstall install-user uninstall-user fmt
 
 all: check release
@@ -80,6 +80,15 @@ filesystem-acceptance:
 benchmark:
 	$(CARGO) bench --locked --bench pipeline
 
+# Before/after CLI comparison on identical fixtures (docs/benchmarks.md):
+#   make benchmark-compare BASELINE=/path/to/rdedupe-2.x BENCH_DIR=/path/with/space
+BENCH_DIR ?= benchmark-output
+benchmark-compare: release
+	@test -n "$(BASELINE)" || { echo "set BASELINE=/path/to/baseline/rdedupe"; exit 1; }
+	mkdir -p $(BENCH_DIR)
+	python3 benches/compare.py $(BENCH_DIR)/fixtures $(BENCH_DIR)/compare.json \
+		baseline=$(BASELINE) rdedupe-$(VERSION)=$(RELEASE_DIR)/$(BINARY)
+
 check: format-check lint test
 
 # Release archive: binary, license, README, docs and the version-paired agent skill.
@@ -100,7 +109,8 @@ dist-check:
 	for f in rdedupe LICENSE README.md skills/rdedupe/SKILL.md skills/rdedupe/references/commands.md \
 		skills/rdedupe/references/safety.md skills/rdedupe/references/workflows.md \
 		skills/rdedupe/references/recovery.md skills/rdedupe/templates/completion-report.md \
-		skills/rdedupe/scripts/summarize.py docs/safety.md docs/formats.md docs/cli.md; do \
+		skills/rdedupe/scripts/summarize.py docs/safety.md docs/formats.md docs/cli.md \
+		docs/design.md docs/migration.md docs/agent-operation.md docs/benchmarks.md; do \
 		test -f $(DIST_DIR)/verify/$(PACKAGE)/$$f || { echo "missing $$f"; exit 1; }; done
 	$(DIST_DIR)/verify/$(PACKAGE)/rdedupe --version | grep -qx "rdedupe $(VERSION)"
 	grep -q 'version: "$(VERSION)"' $(DIST_DIR)/verify/$(PACKAGE)/skills/rdedupe/SKILL.md
@@ -119,5 +129,6 @@ help:
 	@echo "  format-check lint test resource-tests skill-check"
 	@echo "  filesystem-acceptance  real FIDEDUPERANGE tests (TMPDIR on Btrfs/XFS)"
 	@echo "  benchmark              cargo bench workloads (see docs/benchmarks.md)"
+	@echo "  benchmark-compare      CLI before/after: BASELINE=/path/to/rdedupe [BENCH_DIR=dir]"
 	@echo "  release static install install-user uninstall uninstall-user"
 	@echo "  dist dist-check         release archive (TARGET=x86_64-unknown-linux-musl for static)"

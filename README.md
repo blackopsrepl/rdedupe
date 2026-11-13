@@ -21,7 +21,7 @@ group 2 (1048576 bytes each):
 
 summary: 45 paths, 44 objects, 1 hard-link aliases, 2 groups, 2 eligible copies
 space: 3529728 logical redundant bytes; 3530752 allocated bytes in single-link copies (an estimate, not a promise of reclaimed space)
-reads: 786432 fingerprint bytes, 7059456 comparison bytes; 40 objects eliminated by size without reading
+reads: 786432 fingerprint bytes, 0 full-content bytes, 7059456 comparison bytes; 40 objects eliminated by size without reading
 ```
 
 (Real output from a 45-file fixture; its absolute root is abbreviated to `~`.)
@@ -37,7 +37,7 @@ reads: 786432 fingerprint bytes, 7059456 comparison bytes; 40 objects eliminated
 - **Bounded.** Inventory and grouping live in a private on-disk SQLite workspace with a
   memory budget (`--memory-mib`, default 64), a descriptor budget and a scratch-size limit.
   No file is ever read whole into memory. A 4,000-member group plus two 256 MiB files scan
-  in about 12 MiB peak RSS with a 16 MiB budget.
+  in about 11.5 MiB peak RSS with a 16 MiB budget ([measured](docs/benchmarks.md)).
 - **Deterministic.** Output and keeper choice depend only on the files, never on traversal
   order, thread count or budget.
 - **Recoverable.** Changes go through a saved plan; every action is re-checked against the
