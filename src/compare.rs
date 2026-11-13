@@ -62,7 +62,12 @@ fn compare_open(
     buffer_bytes: usize,
     cancel: &Cancellation,
 ) -> Result<(bool, u64)> {
-    let half = (buffer_bytes / 2).max(4096);
+    // One byte more than the file needs is enough to see its end in a single read; small
+    // files must not pay for zeroing two full-size buffers on every comparison.
+    let needed = usize::try_from(left_before.size)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
+    let half = (buffer_bytes / 2).max(4096).min(needed);
     let mut a_buf = vec![0; half];
     let mut b_buf = vec![0; half];
     let mut total = 0;

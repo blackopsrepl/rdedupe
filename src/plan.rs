@@ -236,8 +236,8 @@ impl Index {
             crate::platform::create_unique_dir(&std::env::temp_dir(), "rdedupe-plan-index")?;
         let directory = tempfile_dir::Dir(directory);
         let connection = rusqlite::Connection::open(directory.0.join("index.sqlite3"))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "OFF")?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "cache_size", -4096)?;
         connection.pragma_update(None, "temp_store", "FILE")?;
         connection.execute_batch(

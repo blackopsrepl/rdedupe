@@ -107,14 +107,21 @@ fn fingerprint_candidates(
     }
 }
 
-/// Splits every sampled-digest bucket with more than two members by full-content digest,
+/// Splits every sampled-digest bucket with more than two members (of files larger than two
+/// sample windows, whose samples leave bytes unread) by full-content digest,
 /// so N files that collide on their samples cost N extra reads rather than up to N²
 /// comparisons. Buckets of two go straight to one byte comparison, which is cheaper.
 fn refine_buckets(store: &Store, options: &Options<'_>, metrics: &mut Metrics) -> Result<()> {
     let budget = options.budget;
     let mut last_digest: Option<Vec<u8>> = None;
     loop {
-        let digests = store.sampled_buckets_after(2, last_digest.as_deref())?;
+        // Up to two windows' size the samples cover every byte, so the sampled digest
+        // already separates contents and refining would only re-read the same bytes.
+        let digests = store.sampled_buckets_after(
+            2,
+            2 * crate::fingerprint::WINDOW,
+            last_digest.as_deref(),
+        )?;
         let Some(tail) = digests.last().cloned() else {
             return Ok(());
         };

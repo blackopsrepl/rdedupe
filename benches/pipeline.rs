@@ -72,6 +72,17 @@ fn hard_links(root: &Path) {
     }
 }
 
+/// 200 files of 300 KiB, identical in every sampled window, each different at offset
+/// 100,000: the worst case for sampled fingerprints.
+fn sample_collisions(root: &Path) {
+    let base = bytes(50_000, 300 * 1024);
+    for i in 0..200u32 {
+        let mut content = base.clone();
+        content[100_000..100_004].copy_from_slice(&i.to_le_bytes());
+        fs::write(root.join(format!("{i:05}")), content).unwrap();
+    }
+}
+
 fn sparse(root: &Path) {
     for (name, len) in [("a", 64 << 20), ("b", 64 << 20), ("c", (64 << 20) + 1)] {
         File::create(root.join(name)).unwrap().set_len(len).unwrap();
@@ -84,7 +95,7 @@ fn main() {
         println!("pipeline: run with `cargo bench --bench pipeline` (skipped under cargo test)");
         return;
     }
-    let workloads: [(&str, Builder, Budget); 9] = [
+    let workloads: [(&str, Builder, Budget); 10] = [
         ("unique-sizes", unique_sizes, Budget::default()),
         ("same-size-distinct", same_size_distinct, Budget::default()),
         ("shared-prefix", shared_prefix, Budget::default()),
@@ -93,6 +104,7 @@ fn main() {
         ("large-group", large_group, Budget::default()),
         ("hard-links", hard_links, Budget::default()),
         ("sparse", sparse, Budget::default()),
+        ("sample-collisions", sample_collisions, Budget::default()),
         (
             "tiny-duplicates-8mib-budget",
             tiny_duplicates,
@@ -136,7 +148,7 @@ fn main() {
         samples.sort_by(f64::total_cmp);
         let m = last.unwrap().metrics;
         println!(
-            "{{\"workload\":\"{name}\",\"repeats\":{REPEATS},\"median_ms\":{:.2},\"min_ms\":{:.2},\"max_ms\":{:.2},\"paths\":{},\"objects\":{},\"groups\":{},\"fingerprint_bytes\":{},\"comparison_bytes\":{},\"eliminated_by_size\":{},\"page_cache_bytes\":{}}}",
+            "{{\"workload\":\"{name}\",\"repeats\":{REPEATS},\"median_ms\":{:.2},\"min_ms\":{:.2},\"max_ms\":{:.2},\"paths\":{},\"objects\":{},\"groups\":{},\"fingerprint_bytes\":{},\"full_hash_bytes\":{},\"comparison_bytes\":{},\"eliminated_by_size\":{},\"page_cache_bytes\":{}}}",
             samples[REPEATS / 2],
             samples[0],
             samples[REPEATS - 1],
@@ -144,6 +156,7 @@ fn main() {
             m.objects,
             m.groups,
             m.fingerprint_bytes_read,
+            m.full_hash_bytes_read,
             m.comparison_bytes_read,
             m.eliminated_by_size,
             m.sqlite_page_cache_bytes

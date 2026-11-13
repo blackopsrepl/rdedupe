@@ -54,6 +54,19 @@ def write_case(root, name, entries, hardlinks=(), sparse=()):
     return {"files": files, "logical_bytes": sum(p.stat().st_size for p in d.iterdir()), "sha256": digest.hexdigest()}
 
 
+COLLISION_BASE = None
+
+
+def collision(i):
+    """300 KiB, identical in every sampled window, different at offset 100,000."""
+    global COLLISION_BASE
+    if COLLISION_BASE is None:
+        COLLISION_BASE = content(300 * 1024, 50000)
+    data = bytearray(COLLISION_BASE)
+    data[100000:100004] = i.to_bytes(4, "little")
+    return bytes(data)
+
+
 def fixtures(root):
     prefix = content(32768, 20000)
     large = content(16 * 1024 * 1024, 30000)
@@ -65,6 +78,7 @@ def fixtures(root):
         "large-duplicates": write_case(root, "large-duplicates", [(f"{i:05}.bin", large) for i in range(12)]),
         "hardlinks": write_case(root, "hardlinks", [(f"{i:05}.bin", content(65536, 40000 + i)) for i in range(300)],
                                 hardlinks=[(f"{i:05}.bin", f"alias-{i:05}.bin") for i in range(300)]),
+        "sample-collisions": write_case(root, "sample-collisions", [(f"{i:05}.bin", collision(i)) for i in range(200)]),
         "sparse": write_case(root, "sparse", [], sparse=[("a.bin", 64 << 20), ("b.bin", 64 << 20), ("c.bin", (64 << 20) + 1)]),
     }
 

@@ -82,8 +82,9 @@ impl Store {
         };
         // The scratch database is disposable: durability is irrelevant, bounded memory and
         // bounded disk are what matter.
-        store.conn.pragma_update(None, "journal_mode", "WAL")?;
+        // `synchronous` first, so not even the switch to WAL syncs.
         store.conn.pragma_update(None, "synchronous", "OFF")?;
+        store.conn.pragma_update(None, "journal_mode", "WAL")?;
         store.conn.pragma_update(None, "temp_store", "FILE")?;
         let temp_dir = crate::paths::display_path(&store.workspace);
         if !temp_dir.contains('\\') {
@@ -141,6 +142,22 @@ impl Store {
         Ok(())
     }
 
+    /// Executes one statement through the prepared-statement cache: the engine runs the
+    /// same few statements once per candidate, and re-parsing them dominated small files.
+    fn exec(&self, sql: &str, params: impl rusqlite::Params) -> Result<usize> {
+        Ok(self.conn.prepare_cached(sql)?.execute(params)?)
+    }
+
+    /// Like `Connection::query_row`, through the prepared-statement cache.
+    fn row<T>(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+        f: impl FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        self.conn.prepare_cached(sql)?.query_row(params, f)
+    }
+
     fn wrote(&self) -> Result<()> {
         let pending = self.pending.get() + 1;
         if pending >= BATCH && !self.conn.is_autocommit() {
@@ -164,7 +181,7 @@ impl Store {
     // ----- discovery -------------------------------------------------------------------
 
     pub fn insert_file(&self, path: &Path, obs: &Observation) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "INSERT OR IGNORE INTO files(path,device,inode,size,allocated,modified_ns,changed_ns,mode,links) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 path_bytes(path),
@@ -194,7 +211,7 @@ impl Store {
 
     pub fn insert_unresolved(&self, item: &Unresolved) -> Result<()> {
         let path = item.path.to_path()?;
-        self.conn.execute(
+        self.exec(
             "INSERT INTO unresolved(path,operation,message,retry_safe) VALUES(?1,?2,?3,?4)",
             params![
                 path_bytes(&path),
@@ -225,7 +242,7 @@ impl Store {
             Completeness::Cancelled => "cancelled",
             Completeness::Failed => "failed",
         };
-        self.conn.execute(
+        self.exec(
             "UPDATE metadata SET value=?1 WHERE key='completeness'",
             params![text],
         )?;
@@ -233,7 +250,7 @@ impl Store {
     }
 
     pub fn completeness(&self) -> Result<Completeness> {
-        let value: String = self.conn.query_row(
+        let value: String = self.row(
             "SELECT value FROM metadata WHERE key='completeness'",
             [],
             |r| r.get(0),
@@ -290,25 +307,33 @@ impl Store {
     }
 
     pub fn put_fingerprint(&self, record: &FileRecord, digest: &[u8; 32]) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "INSERT OR REPLACE INTO fingerprints(file_id,digest,refined,path) VALUES(?1,?2,?2,?3)",
             params![record.id, &digest[..], path_bytes(&record.path)],
         )?;
         self.wrote()
     }
 
-    /// Sampled digests shared by more than `min_members` objects, ascending, after `after`.
+    /// Sampled digests of objects larger than `min_size` shared by more than `min_members`
+    /// objects, ascending, after `after`. (Sampled digests cover the size, so every member
+    /// of a bucket has the same size.)
     pub fn sampled_buckets_after(
         &self,
         min_members: u64,
+        min_size: u64,
         after: Option<&[u8]>,
     ) -> Result<Vec<Vec<u8>>> {
         let mut statement = self.conn.prepare_cached(
-            "SELECT digest FROM fingerprints WHERE digest > ?1 GROUP BY digest HAVING COUNT(*) > ?2 ORDER BY digest LIMIT ?3",
+            "SELECT digest FROM fingerprints JOIN files ON files.id = fingerprints.file_id WHERE digest > ?1 AND files.size > ?4 GROUP BY digest HAVING COUNT(*) > ?2 ORDER BY digest LIMIT ?3",
         )?;
         let rows = statement
             .query_map(
-                params![after.unwrap_or(&[]), min_members as i64, PAGE as i64],
+                params![
+                    after.unwrap_or(&[]),
+                    min_members as i64,
+                    PAGE as i64,
+                    min_size as i64
+                ],
                 |r| r.get(0),
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -336,7 +361,7 @@ impl Store {
 
     /// Replaces a candidate's comparison bucket key with a refined (full-content) digest.
     pub fn set_refined(&self, record: &FileRecord, refined: &[u8; 32]) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "UPDATE fingerprints SET refined=?2 WHERE file_id=?1",
             params![record.id, &refined[..]],
         )?;
@@ -345,7 +370,7 @@ impl Store {
 
     /// Withdraws a candidate from comparison (it became unresolved).
     pub fn remove_fingerprint(&self, record: &FileRecord) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "DELETE FROM fingerprints WHERE file_id=?1",
             params![record.id],
         )?;
@@ -379,7 +404,7 @@ impl Store {
     }
 
     pub fn reset_comparison_classes(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM comparison_classes", [])?;
+        self.exec("DELETE FROM comparison_classes", [])?;
         Ok(())
     }
 
@@ -398,12 +423,12 @@ impl Store {
     }
 
     pub fn add_comparison_class(&self, record: &FileRecord) -> Result<i64> {
-        let id: i64 = self.conn.query_row(
+        let id: i64 = self.row(
             "SELECT COALESCE(MAX(class_id), 0) + 1 FROM comparison_classes",
             [],
             |r| r.get(0),
         )?;
-        self.conn.execute(
+        self.exec(
             "INSERT INTO comparison_classes(class_id,file_id,representative,path) VALUES(?1,?2,1,?3)",
             params![id, record.id, path_bytes(&record.path)],
         )?;
@@ -412,7 +437,7 @@ impl Store {
     }
 
     pub fn add_comparison_member(&self, class_id: i64, record: &FileRecord) -> Result<()> {
-        self.conn.execute(
+        self.exec(
             "INSERT INTO comparison_classes(class_id,file_id,representative,path) VALUES(?1,?2,0,?3)",
             params![class_id, record.id, path_bytes(&record.path)],
         )?;
@@ -442,12 +467,12 @@ impl Store {
             };
             for (class_id, count) in classes {
                 if count > 1 {
-                    let next: i64 = self.conn.query_row(
+                    let next: i64 = self.row(
                         "SELECT COALESCE(MAX(group_id), 0) + 1 FROM groups",
                         [],
                         |r| r.get(0),
                     )?;
-                    self.conn.execute(
+                    self.exec(
                         "INSERT INTO groups(group_id,file_id,path) SELECT ?1, file_id, path FROM comparison_classes WHERE class_id=?2",
                         params![next, class_id],
                     )?;
@@ -538,7 +563,7 @@ impl Store {
     }
 
     pub fn group_len(&self, group: i64) -> Result<u64> {
-        Ok(self.conn.query_row(
+        Ok(self.row(
             "SELECT COUNT(*) FROM groups WHERE group_id=?1",
             params![group],
             |r| r.get::<_, i64>(0),
@@ -564,7 +589,7 @@ impl Store {
 
     pub fn put_cache_entry(&self, path: &Path, entry: &CacheEntry) -> Result<()> {
         let o = &entry.observation;
-        self.conn.execute(
+        self.exec(
             "INSERT OR REPLACE INTO cache_entries(path,device,inode,size,modified_ns,changed_ns,digest) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
                 path_bytes(path),
@@ -580,7 +605,7 @@ impl Store {
     }
 
     pub fn clear_cache_entries(&self) -> Result<()> {
-        self.conn.execute("DELETE FROM cache_entries", [])?;
+        self.exec("DELETE FROM cache_entries", [])?;
         Ok(())
     }
 
@@ -656,12 +681,12 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))?
             as u64;
-        let aliases = self.conn.query_row(
+        let aliases = self.row(
             "SELECT COUNT(*) FROM files WHERE alias_of IS NOT NULL",
             [],
             |r| r.get::<_, i64>(0),
         )? as u64;
-        let candidates = self.conn.query_row(
+        let candidates = self.row(
             "SELECT COALESCE(SUM(n), 0) FROM (SELECT COUNT(*) n FROM files WHERE alias_of IS NULL GROUP BY size HAVING COUNT(*) > 1)",
             [],
             |r| r.get::<_, i64>(0),
